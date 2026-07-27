@@ -71,7 +71,7 @@ def export_to_dot(root_node, dot_filepath):
 
         f.write("}\n")
 
-    print(f"? Graphviz DOT file exported to: {dot_filepath}")
+    print(f"✅ Graphviz DOT file exported to: {dot_filepath}")
 
 
 def main():
@@ -83,18 +83,26 @@ def main():
     json_path = Path(args.file)
 
     if not json_path.exists():
-        print(f"? Error: File '{json_path}' not found.", file=sys.stderr)
+        print(f"❌ Error: File '{json_path}' not found.", file=sys.stderr)
         sys.exit(1)
 
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    print("\n? --- CALL GRAPH ASCII TREE --- ?\n")
-    print_ascii_tree(data)
+    # Unwrap callGraph envelope if present, else fallback to raw object
+    root_node = data.get("callGraph", data)
+
+    if "gitCommitId" in data and data["gitCommitId"]:
+        print(f"📌 Git Commit: {data['gitCommitId']}")
+    if "generatedAt" in data and data["generatedAt"]:
+        print(f"🕒 Generated At: {data['generatedAt']}")
+
+    print("\n🌳 --- CALL GRAPH ASCII TREE --- 🌳\n")
+    print_ascii_tree(root_node)
     print("\n-----------------------------------\n")
 
     if args.dot:
-        export_to_dot(data, args.dot)
+        export_to_dot(root_node, args.dot)
 
 
 if __name__ == "__main__":
