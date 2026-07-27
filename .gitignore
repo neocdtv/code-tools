@@ -19,4 +19,4 @@
 **/.DS_Store
 **/*.ucls
 **/.ide
-./call_graph.json
+/call_graph.json
