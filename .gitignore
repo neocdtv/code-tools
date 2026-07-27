@@ -18,5 +18,4 @@
 **/integrationtest.properties
 **/.DS_Store
 **/*.ucls
-**/.idea
-.idea
+**/.ide
