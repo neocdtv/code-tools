@@ -12,12 +12,16 @@ import java.util.regex.Pattern;
 public class CallGraphGenerator {
 
     // --- Configuration ---
-    private static final String SOURCE_PATH = "/home/user/project/src/main/java";
-    private static final String ROOT_CLASS = "class_where_the_method_is";
-    private static final String ROOT_METHOD = "method_to_start_analysis";
-    private static final String PACKAGE_PREFIX = "com.examplepackage.";
-    private static final int MAX_DEPTH = 32;
-    private static final String OUTPUT_FILE = "call_graph.json";
+    private static String PATH_PARAM_NAME = "path";
+    private static String CLASS_PARAM_NAME = "class";
+    private static String METHOD_PARAM_NAME = "method";
+    private static String PACKAGE_PREFIX_PARAM_NAME = "package";
+    private static String PATH = null;
+    private static String CLASS = null;
+    private static String METHOD = null;
+    private static String PACKAGE_PREFIX = null;
+    private static String OUTPUT_FILE = "call_graph.json";
+    private static int MAX_DEPTH = 32;
 
     private static final Set<String> JAVA_KEYWORDS = Set.of(
             "if", "for", "while", "switch", "catch", "synchronized",
@@ -27,19 +31,28 @@ public class CallGraphGenerator {
     private static final JavaProjectBuilder builder = new JavaProjectBuilder();
 
     public static void main(String[] args) {
-        System.out.println("🚀 Indexing Java sources in: " + SOURCE_PATH + "...");
-        builder.addSourceTree(new File(SOURCE_PATH));
+        PATH = CliUtil.findCommandArgumentByName(PATH_PARAM_NAME, args);
+        CLASS = CliUtil.findCommandArgumentByName(CLASS_PARAM_NAME, args);
+        METHOD = CliUtil.findCommandArgumentByName(METHOD_PARAM_NAME, args);
+        PACKAGE_PREFIX = CliUtil.findCommandArgumentByName(PACKAGE_PREFIX_PARAM_NAME, args);
 
-        JavaClass rootClass = findClassByName(ROOT_CLASS);
+        if (PATH == null || CLASS == null || METHOD == null || PACKAGE_PREFIX == null ) {
+            printUsageAndExit();
+        }
+
+        System.out.println("🚀 Indexing Java sources in: " + PATH + "...");
+        builder.addSourceTree(new File(PATH));
+
+        JavaClass rootClass = findClassByName(CLASS);
         if (rootClass == null) {
-            System.err.println("❌ Could not find root class matching name: " + ROOT_CLASS);
+            System.err.println("❌ Could not find root class matching name: " + CLASS);
             return;
         }
 
         System.out.println("📦 Filtering calls to package prefix: '" + PACKAGE_PREFIX + "'");
-        System.out.println("🔍 Building Call Graph starting at: " + rootClass.getFullyQualifiedName() + "." + ROOT_METHOD);
+        System.out.println("🔍 Building Call Graph starting at: " + rootClass.getFullyQualifiedName() + "." + METHOD);
 
-        CallNode tree = buildTree(rootClass.getFullyQualifiedName(), ROOT_METHOD, 0, new HashSet<>());
+        CallNode tree = buildTree(rootClass.getFullyQualifiedName(), METHOD, 0, new HashSet<>());
 
         ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
         try {
@@ -48,6 +61,17 @@ public class CallGraphGenerator {
         } catch (IOException e) {
             System.err.println("❌ Error writing JSON output file: " + e.getMessage());
         }
+    }
+
+    private static void printUsageAndExit() {
+        System.out.println("usage: java -jar target/call_trace.jar " +
+                "-"+ PATH_PARAM_NAME + "=... " +
+                "-" + CLASS_PARAM_NAME + "=... " +
+                "-" + METHOD_PARAM_NAME + "=... " +
+                "-" + PACKAGE_PREFIX_PARAM_NAME + "=... "
+        );
+        //System.out.println("example: java -jar target/java2uml.jar -packageInputConfigs=\"packageInputConfigs.json\" -outputDir=. -outputFormat=UML");
+        System.exit(1);
     }
 
     private static CallNode buildTree(String fullyQualifiedClass, String methodName, int currentDepth, Set<String> visitedPath) {

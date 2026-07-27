@@ -13,10 +13,11 @@
     <name>Call Graph Analyzer</name>
 
     <properties>
+        <name>call_trace</name>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        
+        <shade.version>3.1.0</shade.version>
         <!-- Dependency Versions -->
         <qdox.version>2.0.0</qdox.version>
         <jackson.version>2.17.0</jackson.version>
@@ -39,6 +40,7 @@
     </dependencies>
 
     <build>
+        <finalName>${name}</finalName>
         <plugins>
             <!-- Maven Compiler Plugin -->
             <plugin>
@@ -52,6 +54,7 @@
             </plugin>
 
             <!-- Exec Plugin to easily run via 'mvn exec:java' -->
+            <!--
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
@@ -60,29 +63,44 @@
                     <mainClass>CallGraphGenerator</mainClass>
                 </configuration>
             </plugin>
-
-            <!-- Optional: Package into an executable Runnable JAR with dependencies -->
+            -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-assembly-plugin</artifactId>
-                <version>3.7.0</version>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>${shade.version}</version>
                 <configuration>
-                    <archive>
-                        <manifest>
-                            <mainClass>CallGraphGenerator</mainClass>
-                        </manifest>
-                    </archive>
-                    <descriptorRefs>
-                        <descriptorRef>jar-with-dependencies</descriptorRef>
-                    </descriptorRefs>
+                    <createDependencyReducedPom>
+                        true
+                    </createDependencyReducedPom>
+                    <filters>
+                        <filter>
+                            <artifact>*:*</artifact>
+                            <excludes>
+                                <exclude>META-INF/*.SF</exclude>
+                                <exclude>META-INF/*.DSA</exclude>
+                                <exclude>META-INF/*.RSA</exclude>
+                            </excludes>
+                        </filter>
+                    </filters>
                 </configuration>
                 <executions>
                     <execution>
-                        <id>make-assembly</id>
                         <phase>package</phase>
                         <goals>
-                            <goal>single</goal>
+                            <goal>shade</goal>
                         </goals>
+                        <configuration>
+                            <transformers>
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>
+                                        CallGraphGenerator
+                                    </mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
