@@ -18,5 +18,5 @@
 **/integrationtest.properties
 **/.DS_Store
 **/*.ucls
-**/.ide
+**/.idea
 /call_graph.json
