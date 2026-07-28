@@ -40,7 +40,7 @@ public class CallGraphGenerator {
         METHOD = CliUtil.findCommandArgumentByName(METHOD_PARAM_NAME, args);
         PACKAGE_PREFIX = CliUtil.findCommandArgumentByName(PACKAGE_PREFIX_PARAM_NAME, args);
 
-        if (PATH == null || CLASS == null || METHOD == null || PACKAGE_PREFIX == null ) {
+        if (PATH == null || CLASS == null || METHOD == null || PACKAGE_PREFIX == null) {
             printUsageAndExit();
         }
 
@@ -107,8 +107,57 @@ public class CallGraphGenerator {
     }
 
     private static CallNode buildTree(String fullyQualifiedClass, String methodName, List<String> expectedArgTypes, int currentDepth, Set<String> visitedPath) {
-        String fullSymbol = fullyQualifiedClass + "." + methodName;
-        CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
+        JavaClass cls = builder.getClassByName(fullyQualifiedClass);
+        if (cls == null) {
+            cls = findClassByName(fullyQualifiedClass);
+        }
+
+        if (cls == null) {
+            CallNode missingNode = new CallNode(fullyQualifiedClass + "." + methodName, fullyQualifiedClass, methodName, currentDepth);
+            missingNode.status = "class_not_in_sources";
+            return missingNode;
+        }
+
+        // --- INTERFACE / ABSTRACT CLASS RESOLUTION STEP (Filtered to target package) ---
+        String targetClassName = cls.getFullyQualifiedName();
+        String resolvedImplFqn = null;
+
+        if (cls.isInterface() || cls.isAbstract()) {
+            JavaClass concreteImpl = findConcreteImplementation(cls);
+            if (concreteImpl != null) {
+                resolvedImplFqn = concreteImpl.getFullyQualifiedName();
+                targetClassName = concreteImpl.getFullyQualifiedName();
+                cls = concreteImpl; // Swap target to concrete implementation
+            } else {
+                // No implementation found within target package prefix
+                String fullSymbol = fullyQualifiedClass + "." + methodName;
+                CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
+
+                if (currentDepth >= MAX_DEPTH) {
+                    node.status = "max_depth_reached";
+                    return node;
+                }
+
+                node.filePath = extractRelativeFilePath(cls);
+                node.status = cls.isInterface() ? "interface_endpoint" : "abstract_class_no_impl_found";
+
+                JavaMethod interfaceMethod = findMethodInClassOrSuper(cls, methodName, expectedArgTypes);
+                if (interfaceMethod != null) {
+                    populateMethodMetadata(node, interfaceMethod, cls);
+                } else {
+                    node.status = "method_not_found";
+                }
+                return node;
+            }
+        }
+
+        // --- NODE CREATION FOR CONCRETE / RESOLVED CLASS ---
+        String fullSymbol = targetClassName + "." + methodName;
+        CallNode node = new CallNode(fullSymbol, targetClassName, methodName, currentDepth);
+
+        if (resolvedImplFqn != null) {
+            node.resolvedImplementation = resolvedImplFqn;
+        }
 
         if (currentDepth >= MAX_DEPTH) {
             node.status = "max_depth_reached";
@@ -123,13 +172,7 @@ public class CallGraphGenerator {
         Set<String> nextVisited = new HashSet<>(visitedPath);
         nextVisited.add(fullSymbol);
 
-        JavaClass cls = builder.getClassByName(fullyQualifiedClass);
-        if (cls == null) {
-            node.status = "class_not_in_sources";
-            return node;
-        }
-
-        // --- CAPTURE RELATIVE FILE PATH ---
+        // Initial file path assignment
         node.filePath = extractRelativeFilePath(cls);
 
         // --- CAPTURE CLASS ANNOTATIONS ---
@@ -137,45 +180,58 @@ public class CallGraphGenerator {
             node.classAnnotations.add(extractAnnotationNode(anno));
         }
 
-        // --- INTERFACE RESOLUTION STEP ---
-        JavaClass targetClass = cls;
-        if (cls.isInterface() || cls.isAbstract()) {
-            JavaClass concreteImpl = findConcreteImplementation(cls);
-            if (concreteImpl != null) {
-                node.resolvedImplementation = concreteImpl.getFullyQualifiedName();
-                targetClass = concreteImpl;
-                node.filePath = extractRelativeFilePath(concreteImpl);
-            } else {
-                node.status = cls.isInterface() ? "interface_endpoint_no_impl_found" : "abstract_class_no_impl_found";
-                return node;
-            }
-        }
-
-        JavaMethod method = findMethodInClassOrSuper(targetClass, methodName, expectedArgTypes);
+        // Find method in resolved concrete target class or its superclasses
+        JavaMethod method = findMethodInClassOrSuper(cls, methodName, expectedArgTypes);
         if (method == null) {
             node.status = "method_not_found";
             return node;
         }
 
-        // --- CAPTURE MODIFIERS ---
+        populateMethodMetadata(node, method, cls);
+
+        if (method.isAbstract() || method.getSourceCode() == null) {
+            if (node.status == null) {
+                node.status = "leaf_node_no_body";
+            }
+            return node;
+        }
+
+        List<CalleeTarget> callees = parseCalleesFromSource(cls, method);
+
+        for (CalleeTarget callee : callees) {
+            CallNode childNode = buildTree(callee.fullyQualifiedClass, callee.methodName, callee.argTypes, currentDepth + 1, nextVisited);
+            node.callees.add(childNode);
+        }
+
+        return node;
+    }
+
+    private static void populateMethodMetadata(CallNode node, JavaMethod method, JavaClass targetClass) {
+        JavaClass declaringClass = (method.getDeclaringClass() != null && extractRelativeFilePath(method.getDeclaringClass()) != null)
+                ? method.getDeclaringClass()
+                : targetClass;
+
+        node.filePath = extractRelativeFilePath(declaringClass);
         node.modifiers.addAll(method.getModifiers());
 
-        // --- CAPTURE METHOD ANNOTATIONS ---
+        // Capture Method Annotations
+        node.methodAnnotations.clear();
         for (JavaAnnotation anno : method.getAnnotations()) {
             node.methodAnnotations.add(extractAnnotationNode(anno));
         }
 
-        // --- CAPTURE RETURN TYPE & PARAMETERS ---
+        // Capture Return Type & Parameters
         if (method.getReturnType() != null) {
             node.returnType = method.getReturnType().getGenericFullyQualifiedName();
         }
 
+        node.parameters.clear();
         for (JavaParameter param : method.getParameters()) {
             String paramType = param.getType() != null ? param.getType().getGenericFullyQualifiedName() : "Object";
             node.parameters.add(new ParameterNode(param.getName(), paramType));
         }
 
-        // --- CAPTURE LINE NUMBERS & CLEANED SOURCE CODE ---
+        // Capture Line Numbers & Clean Source Code
         node.startLine = method.getLineNumber();
 
         if (method.getSourceCode() != null) {
@@ -210,32 +266,25 @@ public class CallGraphGenerator {
         } else {
             node.endLine = node.startLine;
         }
-
-        if (method.isAbstract() || method.getSourceCode() == null) {
-            node.status = "leaf_node_no_body";
-            return node;
-        }
-
-        List<CalleeTarget> callees = parseCalleesFromSource(targetClass, method);
-
-        for (CalleeTarget callee : callees) {
-            CallNode childNode = buildTree(callee.fullyQualifiedClass, callee.methodName, callee.argTypes, currentDepth + 1, nextVisited);
-            node.callees.add(childNode);
-        }
-
-        return node;
     }
 
     private static String extractRelativeFilePath(JavaClass cls) {
-        if (cls.getSource() == null || cls.getSource().getURL() == null) {
+        if (cls == null || cls.getSource() == null || cls.getSource().getURL() == null) {
             return null;
         }
+
         try {
-            Path basePath = Paths.get(PATH).toRealPath();
-            Path filePath = Paths.get(cls.getSource().getURL().toURI()).toRealPath();
+            Path basePath = Paths.get(PATH).toAbsolutePath().normalize();
+            Path filePath = Paths.get(cls.getSource().getURL().toURI()).toAbsolutePath().normalize();
+
             return basePath.relativize(filePath).toString().replace('\\', '/');
         } catch (Exception e) {
-            return cls.getSource().getURL().getPath();
+            String rawPath = cls.getSource().getURL().getPath().replace('\\', '/');
+            String normBasePath = PATH.replace('\\', '/');
+            if (rawPath.contains(normBasePath)) {
+                return rawPath.substring(rawPath.indexOf(normBasePath) + normBasePath.length()).replaceAll("^/", "");
+            }
+            return rawPath;
         }
     }
 
@@ -250,13 +299,18 @@ public class CallGraphGenerator {
     private static JavaClass findConcreteImplementation(JavaClass interfaceOrAbstract) {
         String interfaceFqn = interfaceOrAbstract.getFullyQualifiedName();
 
+        // 1. Check naming convention match in target package
         JavaClass conventionImpl = builder.getClassByName(interfaceFqn + "Impl");
-        if (conventionImpl != null && !conventionImpl.isInterface() && !conventionImpl.isAbstract()) {
+        if (conventionImpl != null
+                && !conventionImpl.isInterface()
+                && !conventionImpl.isAbstract()
+                && isAllowedPackage(conventionImpl.getFullyQualifiedName())) {
             return conventionImpl;
         }
 
+        // 2. Scan parsed AST classes filtering by package prefix
         for (JavaClass c : builder.getClasses()) {
-            if (c.isInterface() || c.isAbstract()) {
+            if (c.isInterface() || c.isAbstract() || !isAllowedPackage(c.getFullyQualifiedName())) {
                 continue;
             }
 
@@ -284,14 +338,20 @@ public class CallGraphGenerator {
         if (sourceCode == null) return targets;
 
         Map<String, String> typeMap = new HashMap<>();
+
+        // Map fields
         for (JavaField field : declaringClass.getFields()) {
             if (field.getType() != null) {
-                typeMap.put(field.getName(), field.getType().getFullyQualifiedName());
+                String resolvedType = resolveTypeInClass(declaringClass, field.getType().getFullyQualifiedName());
+                typeMap.put(field.getName(), resolvedType);
             }
         }
+
+        // Map method parameters
         for (JavaParameter param : method.getParameters()) {
             if (param.getType() != null) {
-                typeMap.put(param.getName(), param.getType().getFullyQualifiedName());
+                String resolvedType = resolveTypeInClass(declaringClass, param.getType().getFullyQualifiedName());
+                typeMap.put(param.getName(), resolvedType);
             }
         }
 
@@ -319,6 +379,8 @@ public class CallGraphGenerator {
                 JavaClass staticClass = findClassByName(targetVar);
                 if (staticClass != null) {
                     targetFqn = staticClass.getFullyQualifiedName();
+                } else {
+                    targetFqn = resolveTypeInClass(declaringClass, targetVar);
                 }
             }
 
@@ -351,6 +413,49 @@ public class CallGraphGenerator {
         return targets;
     }
 
+    private static String resolveTypeInClass(JavaClass cls, String typeName) {
+        if (typeName == null) return null;
+
+        // 1. Already fully qualified
+        if (typeName.contains(".")) return typeName;
+
+        // 2. Check explicit imports in source file
+        if (cls.getSource() != null) {
+            for (String imp : cls.getSource().getImports()) {
+                if (imp.endsWith("." + typeName)) {
+                    return imp;
+                }
+            }
+        }
+
+        // 3. Check same package ONLY IF class actually exists in QDox AST
+        if (cls.getPackageName() != null && !cls.getPackageName().isEmpty()) {
+            String testFqn = cls.getPackageName() + "." + typeName;
+            if (builder.getClassByName(testFqn) != null) {
+                return testFqn;
+            }
+        }
+
+        // 4. Fallback: search indexed QDox classes parsed directly from source
+        JavaClass matched = findClassByName(typeName);
+        if (matched != null) {
+            return matched.getFullyQualifiedName();
+        }
+
+        // 5. Standard library class checks
+        try {
+            Class<?> jdkClass = Class.forName("java.util.stream." + typeName);
+            return jdkClass.getName();
+        } catch (ClassNotFoundException ignored) {}
+
+        try {
+            Class<?> jdkClass = Class.forName("java.util." + typeName);
+            return jdkClass.getName();
+        } catch (ClassNotFoundException ignored) {}
+
+        return typeName;
+    }
+
     private static JavaClass findClassByName(String simpleOrFqn) {
         for (JavaClass cls : builder.getClasses()) {
             if (cls.getName().equals(simpleOrFqn) || cls.getFullyQualifiedName().equals(simpleOrFqn)) {
@@ -361,31 +466,60 @@ public class CallGraphGenerator {
     }
 
     private static JavaMethod findMethodInClassOrSuper(JavaClass cls, String methodName, List<String> expectedArgTypes) {
-        List<JavaMethod> candidates = new ArrayList<>();
-        for (JavaMethod m : cls.getMethods()) {
-            if (m.getName().equals(methodName)) {
-                candidates.add(m);
-            }
-        }
+        Queue<JavaClass> queue = new LinkedList<>();
+        Set<String> visited = new HashSet<>();
 
-        if (!candidates.isEmpty()) {
-            if (expectedArgTypes != null && candidates.size() > 1) {
-                for (JavaMethod m : candidates) {
-                    if (m.getParameters().size() == expectedArgTypes.size()) {
-                        return m;
-                    }
+        queue.add(cls);
+
+        while (!queue.isEmpty()) {
+            JavaClass current = queue.poll();
+            if (current == null || !visited.add(current.getFullyQualifiedName())) {
+                continue;
+            }
+
+            List<JavaMethod> candidates = new ArrayList<>();
+            for (JavaMethod m : current.getMethods()) {
+                if (m.getName().equals(methodName)) {
+                    candidates.add(m);
                 }
             }
-            return candidates.get(0);
-        }
 
-        if (cls.getSuperJavaClass() != null) {
-            return findMethodInClassOrSuper(cls.getSuperJavaClass(), methodName, expectedArgTypes);
+            if (!candidates.isEmpty()) {
+                if (expectedArgTypes != null && candidates.size() > 1) {
+                    for (JavaMethod m : candidates) {
+                        if (m.getParameters().size() == expectedArgTypes.size()) {
+                            return m;
+                        }
+                    }
+                }
+                return candidates.get(0);
+            }
+
+            // Traverse Superclass
+            if (current.getSuperJavaClass() != null) {
+                queue.add(current.getSuperJavaClass());
+            }
+
+            // Traverse Super-interfaces
+            for (JavaClass iface : current.getInterfaces()) {
+                queue.add(iface);
+            }
         }
         return null;
     }
 
     private static boolean isAllowedPackage(String fullyQualifiedName) {
+        if (fullyQualifiedName == null) return false;
+
+        // Ignore JDK, Jakarta, and standard third-party libraries
+        if (fullyQualifiedName.startsWith("java.") ||
+                fullyQualifiedName.startsWith("javax.") ||
+                fullyQualifiedName.startsWith("jakarta.") ||
+                fullyQualifiedName.startsWith("org.springframework.") ||
+                fullyQualifiedName.startsWith("com.fasterxml.")) {
+            return false;
+        }
+
         return PACKAGE_PREFIX != null && !PACKAGE_PREFIX.isEmpty()
                 && fullyQualifiedName.startsWith(PACKAGE_PREFIX);
     }
