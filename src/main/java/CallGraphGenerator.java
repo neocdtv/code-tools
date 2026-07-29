@@ -98,10 +98,10 @@ public class CallGraphGenerator {
 
     private static void printUsageAndExit() {
         System.out.println("usage: java -jar target/call_trace.jar " +
-                "-" + PATH_PARAM_NAME + "=... " +
-                "-" + CLASS_PARAM_NAME + "=... " +
-                "-" + METHOD_PARAM_NAME + "=... " +
-                "-" + PACKAGE_PREFIX_PARAM_NAME + "=... "
+                PATH_PARAM_NAME + "=... " +
+                CLASS_PARAM_NAME + "=... " +
+                METHOD_PARAM_NAME + "=... " +
+                PACKAGE_PREFIX_PARAM_NAME + "=... "
         );
         System.exit(1);
     }
