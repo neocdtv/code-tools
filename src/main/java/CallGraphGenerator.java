@@ -211,6 +211,12 @@ public class CallGraphGenerator {
                 ? method.getDeclaringClass()
                 : targetClass;
 
+        // Fix: Update class name to declaring class if method comes from superclass/interface
+        if (!declaringClass.getFullyQualifiedName().equals(node.className)) {
+            node.className = declaringClass.getFullyQualifiedName();
+            node.fullyQualifiedSymbol = node.className + "." + node.methodName;
+        }
+
         node.filePath = extractRelativeFilePath(declaringClass);
         node.modifiers.addAll(method.getModifiers());
 
