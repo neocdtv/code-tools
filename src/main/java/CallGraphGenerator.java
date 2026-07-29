@@ -15,11 +15,12 @@ import java.util.regex.Pattern;
 
 public class CallGraphGenerator {
 
-    // --- Configuration ---
+    // --- Configuration Parameters ---
     private static String PATH_PARAM_NAME = "path";
     private static String CLASS_PARAM_NAME = "class";
     private static String METHOD_PARAM_NAME = "method";
     private static String PACKAGE_PREFIX_PARAM_NAME = "package";
+
     private static String PATH = null;
     private static String CLASS = null;
     private static String METHOD = null;
@@ -98,10 +99,10 @@ public class CallGraphGenerator {
 
     private static void printUsageAndExit() {
         System.out.println("usage: java -jar target/call_trace.jar " +
-                PATH_PARAM_NAME + "=... " +
-                CLASS_PARAM_NAME + "=... " +
-                METHOD_PARAM_NAME + "=... " +
-                PACKAGE_PREFIX_PARAM_NAME + "=... "
+                "-" + PATH_PARAM_NAME + "=... " +
+                "-" + CLASS_PARAM_NAME + "=... " +
+                "-" + METHOD_PARAM_NAME + "=... " +
+                "-" + PACKAGE_PREFIX_PARAM_NAME + "=... "
         );
         System.exit(1);
     }
@@ -118,7 +119,7 @@ public class CallGraphGenerator {
             return missingNode;
         }
 
-        // --- INTERFACE / ABSTRACT CLASS RESOLUTION STEP (Filtered to target package) ---
+        // --- INTERFACE / ABSTRACT CLASS / SPRING REPOSITORY RESOLUTION ---
         String targetClassName = cls.getFullyQualifiedName();
         String resolvedImplFqn = null;
 
@@ -129,7 +130,7 @@ public class CallGraphGenerator {
                 targetClassName = concreteImpl.getFullyQualifiedName();
                 cls = concreteImpl; // Swap target to concrete implementation
             } else {
-                // No implementation found within target package prefix
+                // No physical implementation class exists in target package prefix (e.g., Spring Data Repository)
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
                 CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
 
@@ -139,7 +140,9 @@ public class CallGraphGenerator {
                 }
 
                 node.filePath = extractRelativeFilePath(cls);
-                node.status = cls.isInterface() ? "interface_endpoint" : "abstract_class_no_impl_found";
+
+                boolean isRepository = isSpringRepository(cls);
+                node.status = isRepository ? "spring_repository_endpoint" : (cls.isInterface() ? "interface_endpoint" : "abstract_class_no_impl_found");
 
                 JavaMethod interfaceMethod = findMethodInClassOrSuper(cls, methodName, expectedArgTypes);
                 if (interfaceMethod != null) {
@@ -175,7 +178,7 @@ public class CallGraphGenerator {
         // Initial file path assignment
         node.filePath = extractRelativeFilePath(cls);
 
-        // --- CAPTURE CLASS ANNOTATIONS ---
+        // Capture Class Annotations
         for (JavaAnnotation anno : cls.getAnnotations()) {
             node.classAnnotations.add(extractAnnotationNode(anno));
         }
@@ -211,7 +214,7 @@ public class CallGraphGenerator {
                 ? method.getDeclaringClass()
                 : targetClass;
 
-        // Fix: Update class name to declaring class if method comes from superclass/interface
+        // Update class name to declaring class if method comes from superclass/interface
         if (!declaringClass.getFullyQualifiedName().equals(node.className)) {
             node.className = declaringClass.getFullyQualifiedName();
             node.fullyQualifiedSymbol = node.className + "." + node.methodName;
@@ -237,7 +240,7 @@ public class CallGraphGenerator {
             node.parameters.add(new ParameterNode(param.getName(), paramType));
         }
 
-        // Capture Line Numbers & Clean Source Code
+        // Capture Line Numbers & Formatted Source Code
         node.startLine = method.getLineNumber();
 
         if (method.getSourceCode() != null) {
@@ -274,6 +277,21 @@ public class CallGraphGenerator {
         }
     }
 
+    private static boolean isSpringRepository(JavaClass cls) {
+        for (JavaAnnotation anno : cls.getAnnotations()) {
+            if (anno.getType().getFullyQualifiedName().endsWith("Repository")) {
+                return true;
+            }
+        }
+        for (JavaType iface : cls.getInterfaces()) {
+            String fqn = iface.getFullyQualifiedName();
+            if (fqn.contains("Repository") || fqn.contains("JpaSpecificationExecutor")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static String extractRelativeFilePath(JavaClass cls) {
         if (cls == null || cls.getSource() == null || cls.getSource().getURL() == null) {
             return null;
@@ -297,7 +315,15 @@ public class CallGraphGenerator {
     private static AnnotationNode extractAnnotationNode(JavaAnnotation anno) {
         AnnotationNode node = new AnnotationNode(anno.getType().getFullyQualifiedName());
         for (Map.Entry<String, Object> entry : anno.getNamedParameterMap().entrySet()) {
-            node.properties.put(entry.getKey(), String.valueOf(entry.getValue()));
+            String key = entry.getKey().isBlank() ? "value" : entry.getKey();
+            String val = String.valueOf(entry.getValue());
+
+            // Strips surrounding quotes added by AST parser to string parameters
+            if (val.startsWith("\"") && val.endsWith("\"") && val.length() >= 2) {
+                val = val.substring(1, val.length() - 1);
+            }
+
+            node.properties.put(key, val);
         }
         return node;
     }
@@ -305,12 +331,14 @@ public class CallGraphGenerator {
     private static JavaClass findConcreteImplementation(JavaClass interfaceOrAbstract) {
         String interfaceFqn = interfaceOrAbstract.getFullyQualifiedName();
 
-        // 1. Check naming convention match in target package
+        // 1. Check naming convention match (e.g., MyService -> MyServiceImpl)
+        // Verify that QDox actually parsed a real physical class file on disk!
         JavaClass conventionImpl = builder.getClassByName(interfaceFqn + "Impl");
         if (conventionImpl != null
                 && !conventionImpl.isInterface()
                 && !conventionImpl.isAbstract()
-                && isAllowedPackage(conventionImpl.getFullyQualifiedName())) {
+                && isAllowedPackage(conventionImpl.getFullyQualifiedName())
+                && isClassPhysicallyParsed(conventionImpl)) {
             return conventionImpl;
         }
 
@@ -336,6 +364,10 @@ public class CallGraphGenerator {
         }
 
         return null;
+    }
+
+    private static boolean isClassPhysicallyParsed(JavaClass cls) {
+        return cls != null && cls.getSource() != null && cls.getSource().getURL() != null;
     }
 
     private static List<CalleeTarget> parseCalleesFromSource(JavaClass declaringClass, JavaMethod method) {
@@ -434,11 +466,12 @@ public class CallGraphGenerator {
             }
         }
 
-        // 3. Check same package ONLY IF class actually exists in QDox AST
+        // 3. Check same package (support both Concrete Classes and Interfaces)
         if (cls.getPackageName() != null && !cls.getPackageName().isEmpty()) {
             String testFqn = cls.getPackageName() + "." + typeName;
-            if (builder.getClassByName(testFqn) != null) {
-                return testFqn;
+            JavaClass samePkgClass = findClassByName(testFqn);
+            if (samePkgClass != null) {
+                return samePkgClass.getFullyQualifiedName();
             }
         }
 
