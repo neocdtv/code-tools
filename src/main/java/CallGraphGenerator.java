@@ -33,6 +33,15 @@ public class CallGraphGenerator {
             "return", "throw", "super", "this", "new"
     );
 
+    // Standard java.util.stream.Stream and Optional intermediate/terminal operations to filter out false positives
+    private static final Set<String> STREAM_OPERATIONS = Set.of(
+            "map", "filter", "collect", "flatMap", "forEach", "forEachOrdered",
+            "reduce", "toArray", "min", "max", "count", "anyMatch", "allMatch",
+            "noneMatch", "findFirst", "findAny", "distinct", "sorted", "peek",
+            "limit", "skip", "takeWhile", "dropWhile", "orElse", "orElseThrow",
+            "orElseGet", "ifPresent", "ifPresentOrElse", "get"
+    );
+
     private static final JavaProjectBuilder builder = new JavaProjectBuilder();
 
     public static void main(String[] args) {
@@ -449,7 +458,8 @@ public class CallGraphGenerator {
             }
         }
 
-        Pattern pattern = Pattern.compile("(?:([a-zA-Z0-9_]+)\\.)?([a-zA-Z0-9_]+)\\s*\\(([^)]*)\\)");
+        // Regex updated: Fix 2 - Ignore method matches preceded by 'new' via negative lookbehind
+        Pattern pattern = Pattern.compile("(?<!\\bnew\\s+)(?:([a-zA-Z0-9_]+)\\.)?([a-zA-Z0-9_]+)\\s*\\(([^)]*)\\)");
         Matcher matcher = pattern.matcher(sourceCode);
 
         Set<String> processedInThisMethod = new HashSet<>();
@@ -459,7 +469,8 @@ public class CallGraphGenerator {
             String targetMethod = matcher.group(2);
             String argsRaw = matcher.group(3);
 
-            if (JAVA_KEYWORDS.contains(targetMethod)) {
+            // Ignore keywords and Stream/Optional intermediate/terminal methods
+            if (JAVA_KEYWORDS.contains(targetMethod) || STREAM_OPERATIONS.contains(targetMethod)) {
                 continue;
             }
 
