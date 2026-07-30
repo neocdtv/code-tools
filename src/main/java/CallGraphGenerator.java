@@ -159,7 +159,7 @@ public class CallGraphGenerator {
                 targetClassName = concreteImpl.getFullyQualifiedName();
                 cls = concreteImpl; // Swap target to concrete implementation
             } else {
-                // No physical implementation class exists in target package prefix
+                // Either 0 concrete implementations or >1 (ambiguous) implementations found
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
                 CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
 
@@ -169,7 +169,7 @@ public class CallGraphGenerator {
                 }
 
                 node.filePath = extractRelativeFilePath(cls);
-                node.status = cls.isInterface() ? "interface_endpoint" : "abstract_class_no_impl_found";
+                node.status = cls.isInterface() ? "interface_endpoint_or_multiple_impls" : "abstract_class_unresolved_impl";
 
                 // Capture Class Annotations
                 for (JavaAnnotation anno : cls.getAnnotations()) {
@@ -378,8 +378,7 @@ public class CallGraphGenerator {
     private static JavaClass findConcreteImplementation(JavaClass interfaceOrAbstract) {
         String interfaceFqn = interfaceOrAbstract.getFullyQualifiedName();
 
-        // 1. Check naming convention match (e.g., MyService -> MyServiceImpl)
-        // Verify that QDox actually parsed a real physical class file on disk!
+        // 1. Fast Path: Check standard naming convention (e.g., MyService -> MyServiceImpl)
         JavaClass conventionImpl = builder.getClassByName(interfaceFqn + "Impl");
         if (conventionImpl != null
                 && !conventionImpl.isInterface()
@@ -390,27 +389,37 @@ public class CallGraphGenerator {
         }
 
         // 2. Scan parsed AST classes filtering by package prefix
+        List<JavaClass> matches = new ArrayList<>();
         for (JavaClass c : builder.getClasses()) {
             if (c.isInterface() || c.isAbstract() || !isAllowedPackage(c.getFullyQualifiedName())) {
                 continue;
             }
 
-            for (JavaType implInterface : c.getInterfaces()) {
-                if (implInterface.getFullyQualifiedName().equals(interfaceFqn)) {
-                    return c;
+            boolean matchesInterface = c.getInterfaces().stream()
+                    .anyMatch(implInterface -> implInterface.getFullyQualifiedName().equals(interfaceFqn));
+
+            if (!matchesInterface) {
+                JavaClass superClass = c.getSuperJavaClass();
+                while (superClass != null) {
+                    if (superClass.getFullyQualifiedName().equals(interfaceFqn)) {
+                        matchesInterface = true;
+                        break;
+                    }
+                    superClass = superClass.getSuperJavaClass();
                 }
             }
 
-            JavaClass superClass = c.getSuperJavaClass();
-            while (superClass != null) {
-                if (superClass.getFullyQualifiedName().equals(interfaceFqn)) {
-                    return c;
-                }
-                superClass = superClass.getSuperJavaClass();
+            if (matchesInterface) {
+                matches.add(c);
             }
         }
 
-        return null;
+        // Only return if exactly ONE unambiguous concrete implementation exists
+        if (matches.size() == 1) {
+            return matches.get(0);
+        }
+
+        return null; // 0 matches or 2+ matches (ambiguous)
     }
 
     private static boolean isClassPhysicallyParsed(JavaClass cls) {
