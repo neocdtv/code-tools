@@ -33,13 +33,19 @@ public class CallGraphGenerator {
             "return", "throw", "super", "this", "new"
     );
 
-    // Standard java.util.stream.Stream and Optional intermediate/terminal operations to filter out false positives
+    // Standard java.util.stream.Stream and Optional intermediate/terminal operations
     private static final Set<String> STREAM_OPERATIONS = Set.of(
             "map", "filter", "collect", "flatMap", "forEach", "forEachOrdered",
             "reduce", "toArray", "min", "max", "count", "anyMatch", "allMatch",
             "noneMatch", "findFirst", "findAny", "distinct", "sorted", "peek",
             "limit", "skip", "takeWhile", "dropWhile", "orElse", "orElseThrow",
             "orElseGet", "ifPresent", "ifPresentOrElse", "get"
+    );
+
+    // Standard java.lang.Object methods to exclude from the call graph
+    private static final Set<String> OBJECT_METHODS = Set.of(
+            "equals", "hashCode", "toString", "clone", "getClass",
+            "notify", "notifyAll", "wait"
     );
 
     private static final JavaProjectBuilder builder = new JavaProjectBuilder();
@@ -133,8 +139,6 @@ public class CallGraphGenerator {
         String resolvedImplFqn = null;
 
         if (cls.isInterface() || cls.isAbstract()) {
-            // Check if this interface/class is a Spring Data Repository FIRST
-            // so we capture explicit @EntityGraph annotations instead of searching for false/synthetic implementations.
             boolean isRepository = isSpringRepository(cls);
             if (isRepository) {
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
@@ -148,7 +152,6 @@ public class CallGraphGenerator {
                 node.filePath = extractRelativeFilePath(cls);
                 node.status = "spring_repository_endpoint";
 
-                // Capture Class Annotations
                 for (JavaAnnotation anno : cls.getAnnotations()) {
                     node.classAnnotations.add(extractAnnotationNode(anno));
                 }
@@ -166,9 +169,8 @@ public class CallGraphGenerator {
             if (concreteImpl != null) {
                 resolvedImplFqn = concreteImpl.getFullyQualifiedName();
                 targetClassName = concreteImpl.getFullyQualifiedName();
-                cls = concreteImpl; // Swap target to concrete implementation
+                cls = concreteImpl;
             } else {
-                // Either 0 concrete implementations or >1 (ambiguous) implementations found
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
                 CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
 
@@ -180,7 +182,6 @@ public class CallGraphGenerator {
                 node.filePath = extractRelativeFilePath(cls);
                 node.status = cls.isInterface() ? "interface_endpoint_or_multiple_impls" : "abstract_class_unresolved_impl";
 
-                // Capture Class Annotations
                 for (JavaAnnotation anno : cls.getAnnotations()) {
                     node.classAnnotations.add(extractAnnotationNode(anno));
                 }
@@ -216,15 +217,12 @@ public class CallGraphGenerator {
         Set<String> nextVisited = new HashSet<>(visitedPath);
         nextVisited.add(fullSymbol);
 
-        // Initial file path assignment
         node.filePath = extractRelativeFilePath(cls);
 
-        // Capture Class Annotations
         for (JavaAnnotation anno : cls.getAnnotations()) {
             node.classAnnotations.add(extractAnnotationNode(anno));
         }
 
-        // Find method in resolved concrete target class or its superclasses
         JavaMethod method = findMethodInClassOrSuper(cls, methodName, expectedArgTypes);
         if (method == null) {
             node.status = "method_not_found";
@@ -261,7 +259,6 @@ public class CallGraphGenerator {
 
         node.modifiers.addAll(method.getModifiers());
 
-        // Capture Method Annotations (Check target class/interface first, then declaring class)
         node.methodAnnotations.clear();
         Set<String> addedAnnotationNames = new HashSet<>();
 
@@ -285,7 +282,6 @@ public class CallGraphGenerator {
             }
         }
 
-        // Capture Return Type & Parameters
         if (method.getReturnType() != null) {
             node.returnType = method.getReturnType().getGenericFullyQualifiedName();
         }
@@ -296,7 +292,6 @@ public class CallGraphGenerator {
             node.parameters.add(new ParameterNode(param.getName(), paramType));
         }
 
-        // Capture Line Numbers & Formatted Source Code
         node.startLine = method.getLineNumber();
 
         if (method.getSourceCode() != null) {
@@ -374,7 +369,6 @@ public class CallGraphGenerator {
             String key = entry.getKey().isBlank() ? "value" : entry.getKey();
             String val = String.valueOf(entry.getValue());
 
-            // Strips surrounding quotes added by AST parser to string parameters
             if (val.startsWith("\"") && val.endsWith("\"") && val.length() >= 2) {
                 val = val.substring(1, val.length() - 1);
             }
@@ -387,7 +381,6 @@ public class CallGraphGenerator {
     private static JavaClass findConcreteImplementation(JavaClass interfaceOrAbstract) {
         String interfaceFqn = interfaceOrAbstract.getFullyQualifiedName();
 
-        // 1. Fast Path: Check standard naming convention (e.g., MyService -> MyServiceImpl)
         JavaClass conventionImpl = builder.getClassByName(interfaceFqn + "Impl");
         if (conventionImpl != null
                 && !conventionImpl.isInterface()
@@ -397,7 +390,6 @@ public class CallGraphGenerator {
             return conventionImpl;
         }
 
-        // 2. Scan parsed AST classes filtering by package prefix
         List<JavaClass> matches = new ArrayList<>();
         for (JavaClass c : builder.getClasses()) {
             if (c.isInterface() || c.isAbstract() || !isAllowedPackage(c.getFullyQualifiedName())) {
@@ -423,12 +415,11 @@ public class CallGraphGenerator {
             }
         }
 
-        // Only return if exactly ONE unambiguous concrete implementation exists
         if (matches.size() == 1) {
             return matches.get(0);
         }
 
-        return null; // 0 matches or 2+ matches (ambiguous)
+        return null;
     }
 
     private static boolean isClassPhysicallyParsed(JavaClass cls) {
@@ -442,7 +433,6 @@ public class CallGraphGenerator {
 
         Map<String, String> typeMap = new HashMap<>();
 
-        // Map fields
         for (JavaField field : declaringClass.getFields()) {
             if (field.getType() != null) {
                 String resolvedType = resolveTypeInClass(declaringClass, field.getType().getFullyQualifiedName());
@@ -450,7 +440,6 @@ public class CallGraphGenerator {
             }
         }
 
-        // Map method parameters
         for (JavaParameter param : method.getParameters()) {
             if (param.getType() != null) {
                 String resolvedType = resolveTypeInClass(declaringClass, param.getType().getFullyQualifiedName());
@@ -458,7 +447,6 @@ public class CallGraphGenerator {
             }
         }
 
-        // Regex updated: Fix 2 - Ignore method matches preceded by 'new' via negative lookbehind
         Pattern pattern = Pattern.compile("(?<!\\bnew\\s+)(?:([a-zA-Z0-9_]+)\\.)?([a-zA-Z0-9_]+)\\s*\\(([^)]*)\\)");
         Matcher matcher = pattern.matcher(sourceCode);
 
@@ -469,8 +457,8 @@ public class CallGraphGenerator {
             String targetMethod = matcher.group(2);
             String argsRaw = matcher.group(3);
 
-            // Ignore keywords and Stream/Optional intermediate/terminal methods
-            if (JAVA_KEYWORDS.contains(targetMethod) || STREAM_OPERATIONS.contains(targetMethod)) {
+            // Filter out keywords, stream methods, AND Object base methods (equals, hashCode, etc.)
+            if (JAVA_KEYWORDS.contains(targetMethod) || STREAM_OPERATIONS.contains(targetMethod) || OBJECT_METHODS.contains(targetMethod)) {
                 continue;
             }
 
@@ -521,10 +509,8 @@ public class CallGraphGenerator {
     private static String resolveTypeInClass(JavaClass cls, String typeName) {
         if (typeName == null) return null;
 
-        // 1. Already fully qualified
         if (typeName.contains(".")) return typeName;
 
-        // 2. Check explicit imports in source file
         if (cls.getSource() != null) {
             for (String imp : cls.getSource().getImports()) {
                 if (imp.endsWith("." + typeName)) {
@@ -533,7 +519,6 @@ public class CallGraphGenerator {
             }
         }
 
-        // 3. Check same package (support both Concrete Classes and Interfaces)
         if (cls.getPackageName() != null && !cls.getPackageName().isEmpty()) {
             String testFqn = cls.getPackageName() + "." + typeName;
             JavaClass samePkgClass = findClassByName(testFqn);
@@ -542,13 +527,11 @@ public class CallGraphGenerator {
             }
         }
 
-        // 4. Fallback: search indexed QDox classes parsed directly from source
         JavaClass matched = findClassByName(typeName);
         if (matched != null) {
             return matched.getFullyQualifiedName();
         }
 
-        // 5. Standard library class checks
         try {
             Class<?> jdkClass = Class.forName("java.util.stream." + typeName);
             return jdkClass.getName();
@@ -601,12 +584,10 @@ public class CallGraphGenerator {
                 return candidates.get(0);
             }
 
-            // Traverse Superclass
             if (current.getSuperJavaClass() != null) {
                 queue.add(current.getSuperJavaClass());
             }
 
-            // Traverse Super-interfaces
             for (JavaClass iface : current.getInterfaces()) {
                 queue.add(iface);
             }
@@ -617,7 +598,6 @@ public class CallGraphGenerator {
     private static boolean isAllowedPackage(String fullyQualifiedName) {
         if (fullyQualifiedName == null) return false;
 
-        // Ignore JDK, Jakarta, and standard third-party libraries
         if (fullyQualifiedName.startsWith("java.") ||
                 fullyQualifiedName.startsWith("javax.") ||
                 fullyQualifiedName.startsWith("jakarta.") ||
