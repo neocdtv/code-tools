@@ -124,13 +124,10 @@ public class CallGraphGenerator {
         String resolvedImplFqn = null;
 
         if (cls.isInterface() || cls.isAbstract()) {
-            JavaClass concreteImpl = findConcreteImplementation(cls);
-            if (concreteImpl != null) {
-                resolvedImplFqn = concreteImpl.getFullyQualifiedName();
-                targetClassName = concreteImpl.getFullyQualifiedName();
-                cls = concreteImpl; // Swap target to concrete implementation
-            } else {
-                // No physical implementation class exists in target package prefix (e.g., Spring Data Repository)
+            // Check if this interface/class is a Spring Data Repository FIRST
+            // so we capture explicit @EntityGraph annotations instead of searching for false/synthetic implementations.
+            boolean isRepository = isSpringRepository(cls);
+            if (isRepository) {
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
                 CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
 
@@ -140,9 +137,44 @@ public class CallGraphGenerator {
                 }
 
                 node.filePath = extractRelativeFilePath(cls);
+                node.status = "spring_repository_endpoint";
 
-                boolean isRepository = isSpringRepository(cls);
-                node.status = isRepository ? "spring_repository_endpoint" : (cls.isInterface() ? "interface_endpoint" : "abstract_class_no_impl_found");
+                // Capture Class Annotations
+                for (JavaAnnotation anno : cls.getAnnotations()) {
+                    node.classAnnotations.add(extractAnnotationNode(anno));
+                }
+
+                JavaMethod interfaceMethod = findMethodInClassOrSuper(cls, methodName, expectedArgTypes);
+                if (interfaceMethod != null) {
+                    populateMethodMetadata(node, interfaceMethod, cls);
+                } else {
+                    node.status = "method_not_found";
+                }
+                return node;
+            }
+
+            JavaClass concreteImpl = findConcreteImplementation(cls);
+            if (concreteImpl != null) {
+                resolvedImplFqn = concreteImpl.getFullyQualifiedName();
+                targetClassName = concreteImpl.getFullyQualifiedName();
+                cls = concreteImpl; // Swap target to concrete implementation
+            } else {
+                // No physical implementation class exists in target package prefix
+                String fullSymbol = fullyQualifiedClass + "." + methodName;
+                CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
+
+                if (currentDepth >= MAX_DEPTH) {
+                    node.status = "max_depth_reached";
+                    return node;
+                }
+
+                node.filePath = extractRelativeFilePath(cls);
+                node.status = cls.isInterface() ? "interface_endpoint" : "abstract_class_no_impl_found";
+
+                // Capture Class Annotations
+                for (JavaAnnotation anno : cls.getAnnotations()) {
+                    node.classAnnotations.add(extractAnnotationNode(anno));
+                }
 
                 JavaMethod interfaceMethod = findMethodInClassOrSuper(cls, methodName, expectedArgTypes);
                 if (interfaceMethod != null) {
@@ -214,19 +246,34 @@ public class CallGraphGenerator {
                 ? method.getDeclaringClass()
                 : targetClass;
 
-        // Update class name to declaring class if method comes from superclass/interface
-        if (!declaringClass.getFullyQualifiedName().equals(node.className)) {
-            node.className = declaringClass.getFullyQualifiedName();
-            node.fullyQualifiedSymbol = node.className + "." + node.methodName;
+        if (node.filePath == null) {
+            node.filePath = extractRelativeFilePath(declaringClass);
         }
 
-        node.filePath = extractRelativeFilePath(declaringClass);
         node.modifiers.addAll(method.getModifiers());
 
-        // Capture Method Annotations
+        // Capture Method Annotations (Check target class/interface first, then declaring class)
         node.methodAnnotations.clear();
+        Set<String> addedAnnotationNames = new HashSet<>();
+
+        JavaMethod targetMethod = targetClass.getMethods().stream()
+                .filter(m -> m.getName().equals(method.getName()) && m.getParameters().size() == method.getParameters().size())
+                .findFirst()
+                .orElse(null);
+
+        if (targetMethod != null) {
+            for (JavaAnnotation anno : targetMethod.getAnnotations()) {
+                AnnotationNode nodeAnno = extractAnnotationNode(anno);
+                node.methodAnnotations.add(nodeAnno);
+                addedAnnotationNames.add(nodeAnno.name);
+            }
+        }
+
         for (JavaAnnotation anno : method.getAnnotations()) {
-            node.methodAnnotations.add(extractAnnotationNode(anno));
+            AnnotationNode nodeAnno = extractAnnotationNode(anno);
+            if (!addedAnnotationNames.contains(nodeAnno.name)) {
+                node.methodAnnotations.add(nodeAnno);
+            }
         }
 
         // Capture Return Type & Parameters
