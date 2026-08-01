@@ -433,6 +433,7 @@ public class CallGraphGenerator {
 
         Map<String, String> typeMap = new HashMap<>();
 
+        // 1. Map fields of declaring class
         for (JavaField field : declaringClass.getFields()) {
             if (field.getType() != null) {
                 String resolvedType = resolveTypeInClass(declaringClass, field.getType().getFullyQualifiedName());
@@ -440,6 +441,7 @@ public class CallGraphGenerator {
             }
         }
 
+        // 2. Map method parameters
         for (JavaParameter param : method.getParameters()) {
             if (param.getType() != null) {
                 String resolvedType = resolveTypeInClass(declaringClass, param.getType().getFullyQualifiedName());
@@ -447,6 +449,27 @@ public class CallGraphGenerator {
             }
         }
 
+        // 3. Map local variable declarations (e.g. "RechnungExporter exporter = new ...")
+        Pattern localVarPattern = Pattern.compile("\\b([A-Z][a-zA-Z0-9_<>]*)\\s+([a-zA-Z0-9_]+)\\s*=");
+        Matcher localVarMatcher = localVarPattern.matcher(sourceCode);
+        while (localVarMatcher.find()) {
+            String rawType = localVarMatcher.group(1);
+            String varName = localVarMatcher.group(2);
+
+            // Strip generic bounds if present (e.g., List<RechnungData> -> List)
+            if (rawType.contains("<")) {
+                rawType = rawType.substring(0, rawType.indexOf('<'));
+            }
+
+            if (!JAVA_KEYWORDS.contains(rawType) && !JAVA_KEYWORDS.contains(varName)) {
+                String resolvedType = resolveTypeInClass(declaringClass, rawType);
+                if (resolvedType != null) {
+                    typeMap.put(varName, resolvedType);
+                }
+            }
+        }
+
+        // 4. Match method invocations (excluding 'new ' constructor calls)
         Pattern pattern = Pattern.compile("(?<!\\bnew\\s+)(?:([a-zA-Z0-9_]+)\\.)?([a-zA-Z0-9_]+)\\s*\\(([^)]*)\\)");
         Matcher matcher = pattern.matcher(sourceCode);
 
