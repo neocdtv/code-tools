@@ -6,7 +6,7 @@ import httpx
 app = FastAPI()
 
 # Target where llama-server is running
-TARGET_LLAMA_SERVER = "http://127.0.0.1:8080"
+TARGET_LLAMA_SERVER = "http://127.0.0.1:8082"
 
 # TARGET_LLAMA_SERVER = "http://192.168.178.137:8080"
 
