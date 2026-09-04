@@ -12,6 +12,9 @@ import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.VariableDeclarationExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
+import com.github.javaparser.ast.expr.NormalAnnotationExpr;
+import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
+import com.github.javaparser.ast.expr.MemberValuePair;
 
 import java.io.File;
 import java.io.IOException;
@@ -92,8 +95,8 @@ public class Main {
         node.put("fullyQualifiedSymbol", fqSymbol);
         node.put("className", fullyQualifiedClassName);
         
-        String relativePath = projectRoot.toURI().relativize(sourceFile.toURI()).getPath();
-        node.put("filePath", relativePath);
+        String absolutePath = sourceFile.getAbsolutePath();
+        node.put("filePath", absolutePath);
         node.put("methodName", methodName);
         
         List<String> modifiers = method.getModifiers().stream().map(m -> m.getKeyword().asString()).collect(Collectors.toList());
@@ -102,13 +105,13 @@ public class Main {
         node.put("classAnnotations", mapAnnotations(clazz.getAnnotations()));
         node.put("methodAnnotations", mapAnnotations(method.getAnnotations()));
         node.put("resolvedImplementation", null);
-        node.put("returnType", method.getType().asString());
+        node.put("returnType", resolveFullyQualifiedType(cu, method.getType().asString()));
 
         List<Map<String, Object>> parameters = new ArrayList<>();
         for (Parameter p : method.getParameters()) {
             Map<String, Object> paramMap = new LinkedHashMap<>();
             paramMap.put("name", p.getNameAsString());
-            paramMap.put("type", p.getType().asString());
+            paramMap.put("type", resolveFullyQualifiedType(cu, p.getType().asString()));
             parameters.add(paramMap);
         }
         node.put("parameters", parameters);
@@ -181,7 +184,7 @@ public class Main {
                         Map<String, Object> leaf = new LinkedHashMap<>();
                         leaf.put("fullyQualifiedSymbol", targetFqSymbol);
                         leaf.put("className", targetClassName);
-                        leaf.put("filePath", relativePath);
+                        leaf.put("filePath", absolutePath);
                         leaf.put("methodName", calledMethodName);
                         leaf.put("modifiers", List.of());
                         leaf.put("classAnnotations", List.of());
@@ -204,12 +207,61 @@ public class Main {
         return node;
     }
 
+    private static String resolveFullyQualifiedType(CompilationUnit cu, String typeStr) {
+        if (typeStr == null || typeStr.isEmpty()) {
+            return typeStr;
+        }
+        if (typeStr.contains(".")) {
+            return typeStr;
+        }
+
+        Set<String> primitivesOrVoid = Set.of(
+                "void", "boolean", "byte", "char", "short", "int", "long", "float", "double"
+        );
+        if (primitivesOrVoid.contains(typeStr)) {
+            return typeStr;
+        }
+
+        Set<String> javaLangTypes = Set.of(
+                "String", "Long", "Integer", "Double", "Float", "Boolean", "Byte", "Short", "Character",
+                "Object", "Class", "Math", "System", "Runtime", "Thread", "Throwable", "Exception", "RuntimeException"
+        );
+        if (javaLangTypes.contains(typeStr)) {
+            return "java.lang." + typeStr;
+        }
+
+        for (var importDecl : cu.getImports()) {
+            String importName = importDecl.getNameAsString();
+            if (importName.endsWith("." + typeStr)) {
+                return importName;
+            }
+        }
+
+        String pkg = cu.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("");
+        if (!pkg.isEmpty()) {
+            return pkg + "." + typeStr;
+        }
+
+        return typeStr;
+    }
+
     private static List<Map<String, Object>> mapAnnotations(List<AnnotationExpr> annotations) {
         List<Map<String, Object>> result = new ArrayList<>();
         for (AnnotationExpr ann : annotations) {
             Map<String, Object> annMap = new LinkedHashMap<>();
             annMap.put("name", ann.getNameAsString());
-            annMap.put("properties", Map.of());
+
+            Map<String, String> properties = new LinkedHashMap<>();
+            if (ann instanceof NormalAnnotationExpr) {
+                NormalAnnotationExpr normalAnn = (NormalAnnotationExpr) ann;
+                for (MemberValuePair pair : normalAnn.getPairs()) {
+                    properties.put(pair.getNameAsString(), pair.getValue().toString());
+                }
+            } else if (ann instanceof SingleMemberAnnotationExpr) {
+                SingleMemberAnnotationExpr singleAnn = (SingleMemberAnnotationExpr) ann;
+                properties.put("value", singleAnn.getMemberValue().toString());
+            }
+            annMap.put("properties", properties);
             result.add(annMap);
         }
         return result;
@@ -230,7 +282,12 @@ public class Main {
 
     private static ResolvedMethodTarget resolveMethodTarget(CompilationUnit currentCu, ClassOrInterfaceDeclaration currentClass, MethodDeclaration currentMethod, MethodCallExpr call) {
         String methodName = call.getNameAsString();
-        Optional<MethodDeclaration> localMatch = currentClass.getMethodsByName(methodName).stream().findFirst();
+        int argCount = call.getArguments().size();
+
+        Optional<MethodDeclaration> localMatch = currentClass.getMethodsByName(methodName).stream()
+                .filter(m -> m.getParameters().size() == argCount)
+                .findFirst();
+
         if (localMatch.isPresent()) {
             return new ResolvedMethodTarget(findSourceFile(currentClass.getNameAsString()), currentCu, currentClass, localMatch.get());
         }
@@ -267,7 +324,9 @@ public class Main {
                         if (targetCu != null) {
                             Optional<ClassOrInterfaceDeclaration> targetClass = targetCu.findFirst(ClassOrInterfaceDeclaration.class);
                             if (targetClass.isPresent()) {
-                                Optional<MethodDeclaration> targetMethod = targetClass.get().getMethodsByName(methodName).stream().findFirst();
+                                Optional<MethodDeclaration> targetMethod = targetClass.get().getMethodsByName(methodName).stream()
+                                        .filter(m -> m.getParameters().size() == argCount)
+                                        .findFirst();
                                 if (targetMethod.isPresent()) {
                                     return new ResolvedMethodTarget(targetFile, targetCu, targetClass.get(), targetMethod.get());
                                 }
