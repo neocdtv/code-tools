@@ -10,6 +10,7 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.VariableDeclarationExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 
 import java.io.File;
@@ -141,23 +142,35 @@ public class Main {
                 if (!visited.contains(fqSymbol + "->" + calledMethodName)) {
                     visited.add(fqSymbol + "->" + calledMethodName);
                     
-                    ResolvedMethodTarget target = resolveMethodTarget(cu, clazz, call);
+                    ResolvedMethodTarget target = resolveMethodTarget(cu, clazz, method, call);
                     if (target != null && target.methodDecl != null) {
                         callees.add(parseMethodToNode(target.cu, target.clazz, target.methodDecl, target.file, depth + 1, visited));
                     } else {
                         String targetClassName = fullyQualifiedClassName;
                         if (call.getScope().isPresent()) {
                             String scope = call.getScope().get().toString();
-                            Optional<FieldDeclaration> field = cu.findAll(FieldDeclaration.class).stream()
-                                    .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
+                            
+                            // 1. Check method-scoped local variables first
+                            Optional<VariableDeclarationExpr> localDecl = method.findAll(VariableDeclarationExpr.class).stream()
+                                    .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
                                     .findFirst();
-                            if (field.isPresent()) {
-                                List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
-                                if (!types.isEmpty()) {
-                                    targetClassName = types.get(0).getNameAsString();
-                                }
+                            
+                            if (localDecl.isPresent()) {
+                                targetClassName = localDecl.get().getElementType().asString();
                             } else {
-                                targetClassName = scope.substring(0, 1).toUpperCase() + scope.substring(1);
+                                // 2. Check class-level fields
+                                Optional<FieldDeclaration> field = cu.findAll(FieldDeclaration.class).stream()
+                                        .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
+                                        .findFirst();
+                                if (field.isPresent()) {
+                                    List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
+                                    if (!types.isEmpty()) {
+                                        targetClassName = types.get(0).getNameAsString();
+                                    }
+                                } else {
+                                    // 3. Fallback to capitalized scope name
+                                    targetClassName = scope.substring(0, 1).toUpperCase() + scope.substring(1);
+                                }
                             }
                         }
 
@@ -211,7 +224,7 @@ public class Main {
         }
     }
 
-    private static ResolvedMethodTarget resolveMethodTarget(CompilationUnit currentCu, ClassOrInterfaceDeclaration currentClass, MethodCallExpr call) {
+    private static ResolvedMethodTarget resolveMethodTarget(CompilationUnit currentCu, ClassOrInterfaceDeclaration currentClass, MethodDeclaration currentMethod, MethodCallExpr call) {
         String methodName = call.getNameAsString();
         Optional<MethodDeclaration> localMatch = currentClass.getMethodsByName(methodName).stream().findFirst();
         if (localMatch.isPresent()) {
@@ -220,30 +233,45 @@ public class Main {
 
         if (call.getScope().isPresent()) {
             String scope = call.getScope().get().toString();
-            Optional<FieldDeclaration> field = currentCu.findAll(FieldDeclaration.class).stream()
-                    .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
+            String typeName = null;
+
+            // Check local variables in current method
+            Optional<VariableDeclarationExpr> localDecl = currentMethod.findAll(VariableDeclarationExpr.class).stream()
+                    .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
                     .findFirst();
-            if (field.isPresent()) {
-                List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
-                if (!types.isEmpty()) {
-                    String typeName = types.get(0).getNameAsString();
-                    File targetFile = findSourceFile(typeName);
-                    if (targetFile != null) {
-                        try {
-                            CompilationUnit targetCu = fileToCuCache.computeIfAbsent(targetFile, f -> {
-                                try { return StaticJavaParser.parse(f); } catch (Exception e) { return null; }
-                            });
-                            if (targetCu != null) {
-                                Optional<ClassOrInterfaceDeclaration> targetClass = targetCu.findFirst(ClassOrInterfaceDeclaration.class);
-                                if (targetClass.isPresent()) {
-                                    Optional<MethodDeclaration> targetMethod = targetClass.get().getMethodsByName(methodName).stream().findFirst();
-                                    if (targetMethod.isPresent()) {
-                                        return new ResolvedMethodTarget(targetFile, targetCu, targetClass.get(), targetMethod.get());
-                                    }
+
+            if (localDecl.isPresent()) {
+                typeName = localDecl.get().getElementType().asString();
+            } else {
+                // Check class fields
+                Optional<FieldDeclaration> field = currentCu.findAll(FieldDeclaration.class).stream()
+                        .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
+                        .findFirst();
+                if (field.isPresent()) {
+                    List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
+                    if (!types.isEmpty()) {
+                        typeName = types.get(0).getNameAsString();
+                    }
+                }
+            }
+
+            if (typeName != null) {
+                File targetFile = findSourceFile(typeName);
+                if (targetFile != null) {
+                    try {
+                        CompilationUnit targetCu = fileToCuCache.computeIfAbsent(targetFile, f -> {
+                            try { return StaticJavaParser.parse(f); } catch (Exception e) { return null; }
+                        });
+                        if (targetCu != null) {
+                            Optional<ClassOrInterfaceDeclaration> targetClass = targetCu.findFirst(ClassOrInterfaceDeclaration.class);
+                            if (targetClass.isPresent()) {
+                                Optional<MethodDeclaration> targetMethod = targetClass.get().getMethodsByName(methodName).stream().findFirst();
+                                if (targetMethod.isPresent()) {
+                                    return new ResolvedMethodTarget(targetFile, targetCu, targetClass.get(), targetMethod.get());
                                 }
                             }
-                        } catch (Exception ignored) {}
-                    }
+                        }
+                    } catch (Exception ignored) {}
                 }
             }
         }
