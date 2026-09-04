@@ -34,7 +34,7 @@ public class Main {
 
     public static void main(String[] args) {
         if (args.length < 2) {
-            System.out.println("Usage: mvn exec:java -Dexec.args=\"path/to/module/Class1.java methodName\"");
+            System.out.println("Usage: mvn exec:java -Dexec.args=\"src/main/java/com/example/MyClass.java myMethod\"");
             return;
         }
 
@@ -145,9 +145,25 @@ public class Main {
                     if (target != null && target.methodDecl != null) {
                         callees.add(parseMethodToNode(target.cu, target.clazz, target.methodDecl, target.file, depth + 1, visited));
                     } else {
+                        String targetClassName = fullyQualifiedClassName;
+                        if (call.getScope().isPresent()) {
+                            String scope = call.getScope().get().toString();
+                            Optional<FieldDeclaration> field = cu.findAll(FieldDeclaration.class).stream()
+                                    .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
+                                    .findFirst();
+                            if (field.isPresent()) {
+                                List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
+                                if (!types.isEmpty()) {
+                                    targetClassName = types.get(0).getNameAsString();
+                                }
+                            } else {
+                                targetClassName = scope.substring(0, 1).toUpperCase() + scope.substring(1);
+                            }
+                        }
+
                         Map<String, Object> leaf = new LinkedHashMap<>();
-                        leaf.put("fullyQualifiedSymbol", fullyQualifiedClassName + "." + calledMethodName);
-                        leaf.put("className", fullyQualifiedClassName);
+                        leaf.put("fullyQualifiedSymbol", targetClassName + "." + calledMethodName);
+                        leaf.put("className", targetClassName);
                         leaf.put("filePath", relativePath);
                         leaf.put("methodName", calledMethodName);
                         leaf.put("modifiers", List.of());
@@ -199,7 +215,7 @@ public class Main {
         String methodName = call.getNameAsString();
         Optional<MethodDeclaration> localMatch = currentClass.getMethodsByName(methodName).stream().findFirst();
         if (localMatch.isPresent()) {
-            return new ResolvedMethodTarget(findSourceFileAcrossModules(currentClass.getNameAsString()), currentCu, currentClass, localMatch.get());
+            return new ResolvedMethodTarget(findSourceFile(currentClass.getNameAsString()), currentCu, currentClass, localMatch.get());
         }
 
         if (call.getScope().isPresent()) {
@@ -211,7 +227,7 @@ public class Main {
                 List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
                 if (!types.isEmpty()) {
                     String typeName = types.get(0).getNameAsString();
-                    File targetFile = findSourceFileAcrossModules(typeName);
+                    File targetFile = findSourceFile(typeName);
                     if (targetFile != null) {
                         try {
                             CompilationUnit targetCu = fileToCuCache.computeIfAbsent(targetFile, f -> {
@@ -246,7 +262,7 @@ public class Main {
         return rootCandidate;
     }
 
-    private static File findSourceFileAcrossModules(String className) {
+    private static File findSourceFile(String className) {
         try {
             return Files.walk(projectRoot.toPath())
                     .filter(p -> p.toFile().isFile() && p.toFile().getName().equals(className + ".java"))
