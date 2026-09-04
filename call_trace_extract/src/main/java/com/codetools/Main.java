@@ -43,15 +43,6 @@ public class Main {
         }
     }
 
-    static class MethodResolutionResult {
-        MethodDeclaration methodDeclaration;
-        File sourceFile;
-        MethodResolutionResult(MethodDeclaration methodDeclaration, File sourceFile) {
-            this.methodDeclaration = methodDeclaration;
-            this.sourceFile = sourceFile;
-        }
-    }
-
     private static final Set<String> IGNORED_TYPES = Set.of(
             "List", "Set", "Map", "Collection", "Optional", "String", 
             "Integer", "Long", "Boolean", "Double", "Float", "BigDecimal", 
@@ -104,18 +95,11 @@ public class Main {
                         .orElseThrow(() -> new RuntimeException("No class found in: " + currentTask.file.getName()));
 
                 String originalClassName = parentClass.getNameAsString();
-                
-                // Recursively look up method in the class and its extends hierarchy[cite: 3]
-                MethodResolutionResult resolvedMethod = findMethodRecursive(cu, parentClass, currentTask.methodName, projectRoot);
-                if (resolvedMethod == null) {
-                    System.out.println("Info: Method '" + currentTask.methodName + "' not found in '" + originalClassName + "' or its available superclasses. Skipping method task.");
-                    continue;
-                }
+                MethodDeclaration targetMethod = parentClass.getMethodsByName(currentTask.methodName).stream()
+                        .findFirst()
+                        .orElseThrow(() -> new RuntimeException("Method not found: " + currentTask.methodName + " in " + originalClassName));
 
-                MethodDeclaration targetMethod = resolvedMethod.methodDeclaration;
-                File targetMethodFile = resolvedMethod.sourceFile != null ? resolvedMethod.sourceFile : currentTask.file;
-
-                fileToMethodNames.computeIfAbsent(targetMethodFile, f -> new LinkedHashSet<>()).add(currentTask.methodName);
+                fileToMethodNames.computeIfAbsent(currentTask.file, f -> new LinkedHashSet<>()).add(currentTask.methodName);
 
                 Queue<MethodDeclaration> localQueue = new ArrayDeque<>();
                 Set<MethodDeclaration> visitedLocalMethods = new HashSet<>();
@@ -158,8 +142,6 @@ public class Main {
                                                     taskQueue.add(nextTask);
                                                     System.out.println("Queued cross-module extraction: " + targetFile.getName() + " -> " + call.getNameAsString());
                                                 }
-                                            } else {
-                                                System.out.println("Info: Source code for type '" + baseTypeName + "' is not available. Skipping method call: " + call.getNameAsString());
                                             }
                                         }
                                     }
@@ -171,6 +153,7 @@ public class Main {
 
             } catch (Exception e) {
                 System.err.println("Error processing task for " + currentTask.methodName + ": " + e.getMessage());
+                e.printStackTrace();
             }
         }
 
@@ -179,15 +162,6 @@ public class Main {
             Set<String> methodNames = entry.getValue();
 
             CompilationUnit cu = fileToCu.get(sourceFile);
-            if (cu == null) {
-                try {
-                    cu = StaticJavaParser.parse(sourceFile);
-                } catch (IOException e) {
-                    System.err.println("Failed to parse source file: " + sourceFile.getName());
-                    continue;
-                }
-            }
-            
             ClassOrInterfaceDeclaration parentClass = cu.findFirst(ClassOrInterfaceDeclaration.class).orElseThrow();
             String originalClassName = parentClass.getNameAsString();
 
@@ -332,37 +306,6 @@ public class Main {
         }
     }
 
-    private static MethodResolutionResult findMethodRecursive(CompilationUnit cu, ClassOrInterfaceDeclaration classDecl, String methodName, File projectRoot) {
-        Optional<MethodDeclaration> method = classDecl.getMethodsByName(methodName).stream().findFirst();
-        if (method.isPresent()) {
-            File currentFile = findSourceFileAcrossModules(projectRoot, classDecl.getNameAsString());
-            return new MethodResolutionResult(method.get(), currentFile);
-        }
-
-        // Traverse extends hierarchy
-        for (ClassOrInterfaceType extendedType : classDecl.getExtendedTypes()) {
-            String superName = extendedType.getNameAsString();
-            File superFile = findSourceFileAcrossModules(projectRoot, superName);
-            if (superFile != null) {
-                try {
-                    CompilationUnit superCu = StaticJavaParser.parse(superFile);
-                    Optional<ClassOrInterfaceDeclaration> superDecl = superCu.findFirst(ClassOrInterfaceDeclaration.class);
-                    if (superDecl.isPresent()) {
-                        MethodResolutionResult res = findMethodRecursive(superCu, superDecl.get(), methodName, projectRoot);
-                        if (res != null) {
-                            return res;
-                        }
-                    }
-                } catch (Exception e) {
-                    System.out.println("Info: Could not parse superclass file for " + superName + ": " + e.getMessage());
-                }
-            } else {
-                System.out.println("Info: Source code for superclass '" + superName + "' is not available in the project.");
-            }
-        }
-        return null;
-    }
-
     private static void resolveInterfaceToImplIfNeeded(File rootDir, String typeName) {
         if (interfaceToImplClassName.containsKey(typeName) || IGNORED_TYPES.contains(typeName)) {
             return;
@@ -374,6 +317,7 @@ public class Main {
                 Optional<ClassOrInterfaceDeclaration> classDecl = cu.findFirst(ClassOrInterfaceDeclaration.class);
                 if (classDecl.isPresent() && classDecl.get().isInterface()) {
                     List<File> implFiles = findAllImplementingClassFiles(rootDir, typeName);
+                    // Safe Guard: Only resolve if there is precisely one implementation found, preventing ambiguity.
                     if (implFiles.size() == 1) {
                         File implFile = implFiles.get(0);
                         CompilationUnit implCu = StaticJavaParser.parse(implFile);
