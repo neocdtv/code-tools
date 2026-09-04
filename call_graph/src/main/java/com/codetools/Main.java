@@ -139,43 +139,47 @@ public class Main {
                     continue;
                 }
 
-                if (!visited.contains(fqSymbol + "->" + calledMethodName)) {
-                    visited.add(fqSymbol + "->" + calledMethodName);
+                ResolvedMethodTarget target = resolveMethodTarget(cu, clazz, method, call);
+                
+                String targetClassName = fullyQualifiedClassName;
+                if (target != null && target.clazz != null) {
+                    String targetPkg = target.cu.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("");
+                    String targetCls = target.clazz.getNameAsString();
+                    targetClassName = targetPkg.isEmpty() ? targetCls : targetPkg + "." + targetCls;
+                } else if (call.getScope().isPresent()) {
+                    String scope = call.getScope().get().toString();
                     
-                    ResolvedMethodTarget target = resolveMethodTarget(cu, clazz, method, call);
+                    Optional<VariableDeclarationExpr> localDecl = method.findAll(VariableDeclarationExpr.class).stream()
+                            .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
+                            .findFirst();
+                    
+                    if (localDecl.isPresent()) {
+                        targetClassName = localDecl.get().getElementType().asString();
+                    } else {
+                        Optional<FieldDeclaration> field = cu.findAll(FieldDeclaration.class).stream()
+                                .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
+                                .findFirst();
+                        if (field.isPresent()) {
+                            List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
+                            if (!types.isEmpty()) {
+                                targetClassName = types.get(0).getNameAsString();
+                            }
+                        } else {
+                            targetClassName = scope.substring(0, 1).toUpperCase() + scope.substring(1);
+                        }
+                    }
+                }
+                String targetFqSymbol = targetClassName + "." + calledMethodName;
+                String visitKey = fqSymbol + "->" + targetFqSymbol;
+
+                if (!visited.contains(visitKey)) {
+                    visited.add(visitKey);
+                    
                     if (target != null && target.methodDecl != null) {
                         callees.add(parseMethodToNode(target.cu, target.clazz, target.methodDecl, target.file, depth + 1, visited));
                     } else {
-                        String targetClassName = fullyQualifiedClassName;
-                        if (call.getScope().isPresent()) {
-                            String scope = call.getScope().get().toString();
-                            
-                            // 1. Check method-scoped local variables first
-                            Optional<VariableDeclarationExpr> localDecl = method.findAll(VariableDeclarationExpr.class).stream()
-                                    .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
-                                    .findFirst();
-                            
-                            if (localDecl.isPresent()) {
-                                targetClassName = localDecl.get().getElementType().asString();
-                            } else {
-                                // 2. Check class-level fields
-                                Optional<FieldDeclaration> field = cu.findAll(FieldDeclaration.class).stream()
-                                        .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
-                                        .findFirst();
-                                if (field.isPresent()) {
-                                    List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
-                                    if (!types.isEmpty()) {
-                                        targetClassName = types.get(0).getNameAsString();
-                                    }
-                                } else {
-                                    // 3. Fallback to capitalized scope name
-                                    targetClassName = scope.substring(0, 1).toUpperCase() + scope.substring(1);
-                                }
-                            }
-                        }
-
                         Map<String, Object> leaf = new LinkedHashMap<>();
-                        leaf.put("fullyQualifiedSymbol", targetClassName + "." + calledMethodName);
+                        leaf.put("fullyQualifiedSymbol", targetFqSymbol);
                         leaf.put("className", targetClassName);
                         leaf.put("filePath", relativePath);
                         leaf.put("methodName", calledMethodName);
@@ -235,7 +239,6 @@ public class Main {
             String scope = call.getScope().get().toString();
             String typeName = null;
 
-            // Check local variables in current method
             Optional<VariableDeclarationExpr> localDecl = currentMethod.findAll(VariableDeclarationExpr.class).stream()
                     .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
                     .findFirst();
@@ -243,7 +246,6 @@ public class Main {
             if (localDecl.isPresent()) {
                 typeName = localDecl.get().getElementType().asString();
             } else {
-                // Check class fields
                 Optional<FieldDeclaration> field = currentCu.findAll(FieldDeclaration.class).stream()
                         .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
                         .findFirst();
