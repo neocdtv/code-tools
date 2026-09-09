@@ -19,7 +19,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.*;
 
-public class Main { //[cite: 3]
+public class Main {
 
     static class Task {
         File file;
@@ -62,7 +62,7 @@ public class Main { //[cite: 3]
     private static final Map<String, String> interfaceToImplClassName = new HashMap<>();
     private static final Map<String, ImportDeclaration> interfaceToImplImport = new HashMap<>();
 
-    public static void main(String[] args) { //[cite: 3]
+    public static void main(String[] args) { //
         if (args.length < 2) {
             System.out.println("Usage: mvn exec:java -Dexec.args=\"path/to/module/Class1.java methodName\"");
             return;
@@ -75,7 +75,9 @@ public class Main { //[cite: 3]
         System.out.println("Detected Project Root: " + projectRoot.getAbsolutePath());
 
         String currentTimestamp = String.valueOf(Instant.now().toEpochMilli());
-        File baseExtractedDir = new File("extracted", currentTimestamp);
+        File sessionDir = new File("output", currentTimestamp);
+        File baseExtractedDir = new File(sessionDir, "extracted");
+        File baseOriginalDir = new File(sessionDir, "original");
 
         Queue<Task> taskQueue = new ArrayDeque<>();
         Set<String> processedTasks = new HashSet<>();
@@ -342,6 +344,21 @@ public class Main { //[cite: 3]
                 System.out.println("Successfully generated: " + outputFile.getAbsolutePath());
             } catch (IOException e) {
                 System.err.println("Error writing output file for " + originalClassName + ": " + e.getMessage());
+            }
+
+            File originalTargetDir = baseOriginalDir;
+            if (cu.getPackageDeclaration().isPresent()) {
+                String packagePath = cu.getPackageDeclaration().get().getNameAsString().replace('.', File.separatorChar);
+                originalTargetDir = new File(baseOriginalDir, packagePath);
+            }
+            originalTargetDir.mkdirs();
+
+            File originalOutputFile = new File(originalTargetDir, sourceFile.getName());
+            try {
+                Files.copy(sourceFile.toPath(), originalOutputFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                System.out.println("Successfully copied original: " + originalOutputFile.getAbsolutePath());
+            } catch (IOException e) {
+                System.err.println("Error copying original file for " + sourceFile.getName() + ": " + e.getMessage());
             }
         }
     }
