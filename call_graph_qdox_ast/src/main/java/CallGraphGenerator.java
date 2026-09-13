@@ -1,6 +1,8 @@
 import com.fasterxml.jackson.core.util.DefaultIndenter;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.javaparser.StaticJavaParser;
+import com.github.javaparser.ast.CompilationUnit;
 import com.thoughtworks.qdox.JavaProjectBuilder;
 import com.thoughtworks.qdox.model.*;
 
@@ -14,10 +16,11 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class CallGraphGenerator {
+
+    public static final Map<File, CompilationUnit> fileToCuCache = new HashMap<>();
+
 
     // --- Configuration Parameters ---
     private static String PATH_PARAM_NAME = "path";
@@ -37,13 +40,38 @@ public class CallGraphGenerator {
             "return", "throw", "super", "this", "new"
     );
 
-    // Standard java.util.stream.Stream and Optional intermediate/terminal operations
-    private static final Set<String> STREAM_OPERATIONS = Set.of(
+    public static final Set<String> IGNORED_METHODS = Set.of(
+            // --- STREAMS & OPTIONALS (Your original list + additions) ---
             "map", "filter", "collect", "flatMap", "forEach", "forEachOrdered",
             "reduce", "toArray", "min", "max", "count", "anyMatch", "allMatch",
             "noneMatch", "findFirst", "findAny", "distinct", "sorted", "peek",
             "limit", "skip", "takeWhile", "dropWhile", "orElse", "orElseThrow",
-            "orElseGet", "ifPresent", "ifPresentOrElse", "get"
+            "orElseGet", "ifPresent", "ifPresentOrElse", "get", "isPresent",
+            "isEmpty", "stream", "parallelStream", "toList", "toSet", "of",
+            "ofNullable", "empty",
+
+            // --- OBJECT FUNDAMENTALS ---
+            "equals", "hashCode", "toString", "getClass", "clone",
+            "wait", "notify", "notifyAll",
+
+            // --- COLLECTIONS & MAPS ---
+            "add", "addAll", "remove", "removeAll", "retainAll", "clear",
+            "size", "contains", "containsAll", "put", "putAll", "putIfAbsent",
+            "keySet", "values", "entrySet", "containsKey", "containsValue",
+            "compute", "computeIfAbsent", "computeIfPresent", "merge",
+            "iterator", "hasNext", "next", "removeIf",
+
+            // --- STRINGS ---
+            "length", "trim", "strip", "isBlank", "substring", "contains",
+            "startsWith", "endsWith", "replace", "replaceAll", "toLowerCase",
+            "toUpperCase", "split", "concat", "charAt", "indexOf", "lastIndexOf",
+            "matches", "format", "valueOf",
+
+            // --- LOGGING ---
+            "trace", "debug", "info", "warn", "error", "fatal", "log",
+
+            // --- BUILDERS & FACTORIES ---
+            "builder", "build", "newInstance", "getInstance"
     );
 
     // Standard java.lang.Object methods to exclude from the call graph
@@ -68,6 +96,7 @@ public class CallGraphGenerator {
         System.out.println("🚀 Indexing Java sources in: " + PATH + "...");
         File sourceDir = new File(PATH);
         builder.addSourceTree(sourceDir);
+        ParserBridge.ROOT_PATH = sourceDir;
 
         if (builder.getSources() == null || builder.getSources().isEmpty()) {
             System.err.println("⚠️ Warning: Qdox did not find or parse any source files in the specified path: " + PATH);
@@ -80,6 +109,15 @@ public class CallGraphGenerator {
             System.err.println("❌ Could not find root class matching name: " + CLASS);
             return;
         }
+
+        File initialFile = new File(rootClass.getSource().getURL().getFile());
+        CompilationUnit cu = fileToCuCache.computeIfAbsent(initialFile, f -> {
+            try {
+                return StaticJavaParser.parse(f);
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to parse: " + f.getName(), e);
+            }
+        });
 
         String commitId = getGitCommitId(sourceDir);
         System.out.println("📌 Git Commit ID: " + (commitId != null ? commitId : "UNKNOWN (Not a git repository)"));
@@ -164,7 +202,7 @@ public class CallGraphGenerator {
         System.exit(1);
     }
 
-    // --- NEW: Universal helper to track missing dependency files ---
+    // --- Universal helper to track missing dependency files ---
     private static void trackClassFile(JavaClass cls) {
         if (cls != null && cls.getSource() != null && cls.getSource().getURL() != null) {
             if (isAllowedPackage(cls.getFullyQualifiedName())) {
@@ -189,14 +227,11 @@ public class CallGraphGenerator {
             return missingNode;
         }
 
-        // Use the new tracker to capture the class file
         trackClassFile(cls);
 
-        // --- LOGGING FOR EVERY PROCESSED CLASS / INTERFACE / ABSTRACT CLASS ---
         String classKind = cls.isInterface() ? "Interface" : (cls.isAbstract() ? "Abstract Class" : "Class");
         System.out.println("⚙️ Processing " + classKind + ": " + cls.getFullyQualifiedName() + " (Depth: " + currentDepth + ")");
 
-        // --- INTERFACE / ABSTRACT CLASS / SPRING REPOSITORY RESOLUTION ---
         String targetClassName = cls.getFullyQualifiedName();
         String resolvedImplFqn = null;
 
@@ -232,8 +267,6 @@ public class CallGraphGenerator {
                 resolvedImplFqn = concreteImpl.getFullyQualifiedName();
                 targetClassName = concreteImpl.getFullyQualifiedName();
                 cls = concreteImpl;
-
-                // Track the concrete implementation
                 trackClassFile(cls);
             } else {
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
@@ -261,7 +294,6 @@ public class CallGraphGenerator {
             }
         }
 
-        // --- NODE CREATION FOR CONCRETE / RESOLVED CLASS ---
         String fullSymbol = targetClassName + "." + methodName;
         CallNode node = new CallNode(fullSymbol, targetClassName, methodName, currentDepth);
 
@@ -303,9 +335,14 @@ public class CallGraphGenerator {
             return node;
         }
 
-        List<CalleeTarget> callees = parseCalleesFromSource(cls, method);
+
+        List<CalleeTarget> callees = ParserBridge.parseCalleesFromSource(cls, method);
 
         for (CalleeTarget callee : callees) {
+            // --- LOGGING: Log caller context leading to the callee ---
+            System.out.println("   ├── 🔗 [Caller: " + targetClassName + "." + methodName + " (Depth " + currentDepth + ")] " +
+                    "--> Leading to Callee: " + callee.fullyQualifiedClass + "." + callee.methodName + "()");
+
             CallNode childNode = buildTree(callee.fullyQualifiedClass, callee.methodName, callee.argTypes, currentDepth + 1, nextVisited);
             node.callees.add(childNode);
         }
@@ -318,7 +355,6 @@ public class CallGraphGenerator {
                 ? method.getDeclaringClass()
                 : targetClass;
 
-        // Ensure declaring class is tracked
         trackClassFile(declaringClass);
 
         if (node.filePath == null) {
@@ -352,7 +388,6 @@ public class CallGraphGenerator {
 
         if (method.getReturnType() != null) {
             node.returnType = method.getReturnType().getGenericFullyQualifiedName();
-            // Track the return type class
             trackClassFile(findClassByName(method.getReturnType().getFullyQualifiedName()));
         }
 
@@ -360,7 +395,6 @@ public class CallGraphGenerator {
         for (JavaParameter param : method.getParameters()) {
             String paramType = param.getType() != null ? param.getType().getGenericFullyQualifiedName() : "Object";
             if (param.getType() != null) {
-                // Track parameter class type
                 trackClassFile(findClassByName(param.getType().getFullyQualifiedName()));
             }
             node.parameters.add(new ParameterNode(param.getName(), paramType));
@@ -500,118 +534,13 @@ public class CallGraphGenerator {
         return cls != null && cls.getSource() != null && cls.getSource().getURL() != null;
     }
 
-    private static List<CalleeTarget> parseCalleesFromSource(JavaClass declaringClass, JavaMethod method) {
-        List<CalleeTarget> targets = new ArrayList<>();
-        String sourceCode = method.getSourceCode();
-        if (sourceCode == null) return targets;
-
-        Map<String, String> typeMap = new HashMap<>();
-
-        // 1. Map fields of declaring class
-        for (JavaField field : declaringClass.getFields()) {
-            if (field.getType() != null) {
-                String resolvedType = resolveTypeInClass(declaringClass, field.getType().getFullyQualifiedName());
-                typeMap.put(field.getName(), resolvedType);
-            }
-        }
-
-        // 2. Map method parameters
-        for (JavaParameter param : method.getParameters()) {
-            if (param.getType() != null) {
-                String resolvedType = resolveTypeInClass(declaringClass, param.getType().getFullyQualifiedName());
-                typeMap.put(param.getName(), resolvedType);
-            }
-        }
-
-        // 3. Map local variable declarations (e.g. "RechnungExporter exporter = new ...")
-        Pattern localVarPattern = Pattern.compile("\\b([A-Z][a-zA-Z0-9_<>]*)\\s+([a-zA-Z0-9_]+)\\s*=");
-        Matcher localVarMatcher = localVarPattern.matcher(sourceCode);
-        while (localVarMatcher.find()) {
-            String rawType = localVarMatcher.group(1);
-            String varName = localVarMatcher.group(2);
-
-            // Strip generic bounds if present (e.g., List<RechnungData> -> List)
-            if (rawType.contains("<")) {
-                rawType = rawType.substring(0, rawType.indexOf('<'));
-            }
-
-            if (!JAVA_KEYWORDS.contains(rawType) && !JAVA_KEYWORDS.contains(varName)) {
-                String resolvedType = resolveTypeInClass(declaringClass, rawType);
-                if (resolvedType != null) {
-                    typeMap.put(varName, resolvedType);
-                }
-            }
-        }
-
-        // 4. Match method invocations (excluding 'new ' constructor calls)
-        Pattern pattern = Pattern.compile("(?<!\\bnew\\s+)(?:([a-zA-Z0-9_]+)\\.)?([a-zA-Z0-9_]+)\\s*\\(([^)]*)\\)");
-        Matcher matcher = pattern.matcher(sourceCode);
-
-        Set<String> processedInThisMethod = new HashSet<>();
-
-        while (matcher.find()) {
-            String targetVar = matcher.group(1);
-            String targetMethod = matcher.group(2);
-            String argsRaw = matcher.group(3);
-
-            // Filter out keywords, stream methods, AND Object base methods (equals, hashCode, etc.)
-            if (JAVA_KEYWORDS.contains(targetMethod) || STREAM_OPERATIONS.contains(targetMethod) || OBJECT_METHODS.contains(targetMethod)) {
-                continue;
-            }
-
-            String targetFqn = null;
-
-            if (targetVar == null || targetVar.equals("this")) {
-                targetFqn = declaringClass.getFullyQualifiedName();
-            } else if (typeMap.containsKey(targetVar)) {
-                targetFqn = typeMap.get(targetVar);
-            } else {
-                JavaClass staticClass = findClassByName(targetVar);
-                if (staticClass != null) {
-                    targetFqn = staticClass.getFullyQualifiedName();
-                } else {
-                    targetFqn = resolveTypeInClass(declaringClass, targetVar);
-                }
-            }
-
-            if (targetFqn != null) {
-                if (!isAllowedPackage(targetFqn)) {
-                    continue;
-                }
-
-                List<String> argTypes = new ArrayList<>();
-                if (argsRaw != null && !argsRaw.isBlank()) {
-                    String[] splitArgs = argsRaw.split(",");
-                    for (String arg : splitArgs) {
-                        String argTrimmed = arg.trim();
-                        if (typeMap.containsKey(argTrimmed)) {
-                            argTypes.add(typeMap.get(argTrimmed));
-                        } else {
-                            argTypes.add("java.lang.Object");
-                        }
-                    }
-                }
-
-                String uniqueKey = targetFqn + "." + targetMethod + "(" + argTypes.size() + ")";
-                if (!processedInThisMethod.contains(uniqueKey)) {
-                    processedInThisMethod.add(uniqueKey);
-                    targets.add(new CalleeTarget(targetFqn, targetMethod, argTypes));
-                }
-            }
-        }
-
-        return targets;
-    }
-
     private static String resolveTypeInClass(JavaClass cls, String typeName) {
         if (typeName == null) return null;
-
         if (typeName.contains(".")) return typeName;
 
         if (cls.getSource() != null) {
             for (String imp : cls.getSource().getImports()) {
                 if (imp.endsWith("." + typeName)) {
-                    // Track explicitly imported dependencies
                     trackClassFile(findClassByName(imp));
                     return imp;
                 }
@@ -667,7 +596,6 @@ public class CallGraphGenerator {
                 continue;
             }
 
-            // Ensure parent classes and interfaces evaluated in hierarchy are also tracked
             trackClassFile(current);
 
             List<JavaMethod> candidates = new ArrayList<>();
@@ -769,18 +697,6 @@ public class CallGraphGenerator {
 
         public AnnotationNode(String name) {
             this.name = name;
-        }
-    }
-
-    private static class CalleeTarget {
-        String fullyQualifiedClass;
-        String methodName;
-        List<String> argTypes;
-
-        CalleeTarget(String fullyQualifiedClass, String methodName, List<String> argTypes) {
-            this.fullyQualifiedClass = fullyQualifiedClass;
-            this.methodName = methodName;
-            this.argTypes = argTypes;
         }
     }
 }
