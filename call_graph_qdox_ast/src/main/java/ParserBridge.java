@@ -3,6 +3,7 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.*;
 import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
+import com.github.javaparser.resolution.UnsolvedSymbolException;
 import com.github.javaparser.resolution.declarations.ResolvedMethodDeclaration;
 import com.thoughtworks.qdox.model.JavaClass;
 import com.thoughtworks.qdox.model.JavaMethod;
@@ -357,67 +358,61 @@ public class ParserBridge {
     }
 
     private static ResolvedMethodTarget resolveMethodTarget(CompilationUnit currentCu, ClassOrInterfaceDeclaration currentClass, MethodDeclaration currentMethod, MethodCallExpr call) {
-        String methodName = call.getNameAsString();
-        int argCount = call.getArguments().size();
+        try {
+            // 1. Let the SymbolSolver do all the heavy lifting (handles scopes, generics, overloading, etc.)
+            ResolvedMethodDeclaration resolvedMethod = call.resolve();
 
-        Optional<MethodDeclaration> localMatch = currentClass.getMethodsByName(methodName).stream()
-                .filter(m -> m.getParameters().size() == argCount)
-                .findFirst();
+            // 2. Get the fully qualified name of the class declaring this method (e.g., "com.example.MyClass")
+            String qualifiedClassName = resolvedMethod.declaringType().getQualifiedName();
 
-        if (localMatch.isPresent()) {
-            return new ResolvedMethodTarget(findSourceFile(currentClass.getNameAsString()), currentCu, currentClass, localMatch.get());
-        }
+            // 3. Find the source file
+            // Note: Make sure your findSourceFile method handles fully qualified names!
+            File targetFile = findSourceFile(qualifiedClassName);
 
-        if (call.getScope().isPresent()) {
-            String scope = call.getScope().get().toString();
-            String typeName = null;
-
-            Optional<VariableDeclarationExpr> localDecl = currentMethod.findAll(VariableDeclarationExpr.class).stream()
-                    .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
-                    .findFirst();
-
-            if (localDecl.isPresent()) {
-                typeName = localDecl.get().getElementType().asString();
-            } else {
-                Optional<FieldDeclaration> field = currentCu.findAll(FieldDeclaration.class).stream()
-                        .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
-                        .findFirst();
-                if (field.isPresent()) {
-                    List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
-                    if (!types.isEmpty()) {
-                        typeName = types.get(0).getNameAsString();
-                    }
-                }
-            }
-
-            if (typeName != null) {
-                File targetFile = findSourceFile(typeName);
-
-                if (targetFile != null) {
+            if (targetFile != null) {
+                // 4. Parse or retrieve the target file from cache
+                CompilationUnit targetCu = CallGraphGenerator.fileToCuCache.computeIfAbsent(targetFile, f -> {
                     try {
-                        CompilationUnit targetCu = CallGraphGenerator.fileToCuCache.computeIfAbsent(targetFile, f -> {
-                            try {
-                                return StaticJavaParser.parse(f);
-                            } catch (Exception e) {
-                                return null;
-                            }
-                        });
-                        if (targetCu != null) {
-                            Optional<ClassOrInterfaceDeclaration> targetClass = targetCu.findFirst(ClassOrInterfaceDeclaration.class);
-                            if (targetClass.isPresent()) {
-                                Optional<MethodDeclaration> targetMethod = targetClass.get().getMethodsByName(methodName).stream()
-                                        .filter(m -> m.getParameters().size() == argCount)
-                                        .findFirst();
-                                if (targetMethod.isPresent()) {
-                                    return new ResolvedMethodTarget(targetFile, targetCu, targetClass.get(), targetMethod.get());
-                                }
+                        return StaticJavaParser.parse(f);
+                    } catch (Exception e) {
+                        return null;
+                    }
+                });
+
+                if (targetCu != null) {
+                    // 5. Find the Class/Interface in the target AST
+                    String simpleClassName = resolvedMethod.declaringType().getName();
+                    Optional<ClassOrInterfaceDeclaration> targetClass = targetCu.getClassByName(simpleClassName);
+
+                    if (targetClass.isPresent()) {
+                        // 6. Bridge the resolved symbol back to the AST node (MethodDeclaration)
+// Safely extract the Node and cast it to a MethodDeclaration
+                        Optional<MethodDeclaration> targetMethodNode = resolvedMethod.toAst()
+                                .filter(node -> node instanceof MethodDeclaration)
+                                .map(node -> (MethodDeclaration) node);
+                        if (targetMethodNode.isPresent()) {
+                            return new ResolvedMethodTarget(targetFile, targetCu, targetClass.get(), targetMethodNode.get());
+                        } else {
+                            // Fallback: If toAst() fails, match manually by name and parameter count
+                            Optional<MethodDeclaration> manualMatch = targetClass.get().getMethodsByName(resolvedMethod.getName()).stream()
+                                    .filter(m -> m.getParameters().size() == resolvedMethod.getNumberOfParams())
+                                    .findFirst();
+
+                            if (manualMatch.isPresent()) {
+                                return new ResolvedMethodTarget(targetFile, targetCu, targetClass.get(), manualMatch.get());
                             }
                         }
-                    } catch (Exception ignored) {
                     }
                 }
             }
+        } catch (UnsolvedSymbolException e) {
+            // The solver couldn't find the target (e.g., it's an external library not configured in your TypeSolver)
+            return null;
+        } catch (Exception e) {
+            // Catch any other unexpected resolution/parsing errors
+            return null;
         }
+
         return null;
     }
 

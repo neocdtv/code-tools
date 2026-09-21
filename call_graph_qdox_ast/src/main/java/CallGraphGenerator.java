@@ -28,7 +28,7 @@ public class CallGraphGenerator {
     private static String METHOD_PARAM_NAME = "method";
     private static String PACKAGE_PREFIX_PARAM_NAME = "package";
 
-    private static String PATH = null;
+    private static String ROOT_PATH = null;
     private static String CLASS = null;
     private static String METHOD = null;
     private static String PACKAGE_PREFIX = null;
@@ -62,7 +62,7 @@ public class CallGraphGenerator {
             "iterator", "hasNext", "next", "removeIf",
 
             // --- STRINGS ---
-            "length", "trim", "strip", "isBlank", "substring", "contains",
+            "length", "trim", "strip", "isBlank", "substring",
             "startsWith", "endsWith", "replace", "replaceAll", "toLowerCase",
             "toUpperCase", "split", "concat", "charAt", "indexOf", "lastIndexOf",
             "matches", "format", "valueOf",
@@ -83,23 +83,25 @@ public class CallGraphGenerator {
     private static final JavaProjectBuilder builder = new JavaProjectBuilder();
     private static final Set<String> processedFilePaths = new LinkedHashSet<>();
 
-    public static void main(String[] args) {
-        PATH = CliUtil.findCommandArgumentByName(PATH_PARAM_NAME, args);
+    public static void main(String[] args) throws IOException {
+        ROOT_PATH = CliUtil.findCommandArgumentByName(PATH_PARAM_NAME, args);
         CLASS = CliUtil.findCommandArgumentByName(CLASS_PARAM_NAME, args);
         METHOD = CliUtil.findCommandArgumentByName(METHOD_PARAM_NAME, args);
         PACKAGE_PREFIX = CliUtil.findCommandArgumentByName(PACKAGE_PREFIX_PARAM_NAME, args);
 
-        if (PATH == null || CLASS == null || METHOD == null || PACKAGE_PREFIX == null) {
+        if (ROOT_PATH == null || CLASS == null || METHOD == null || PACKAGE_PREFIX == null) {
             printUsageAndExit();
         }
 
-        System.out.println("🚀 Indexing Java sources in: " + PATH + "...");
-        File sourceDir = new File(PATH);
+        System.out.println("🚀 Indexing Java sources in: " + ROOT_PATH + "...");
+        File sourceDir = new File(ROOT_PATH);
         builder.addSourceTree(sourceDir);
         ParserBridge.ROOT_PATH = sourceDir;
 
+        SymbolSolverSetup.initializeForMultiModuleProject(ROOT_PATH);
+
         if (builder.getSources() == null || builder.getSources().isEmpty()) {
-            System.err.println("⚠️ Warning: Qdox did not find or parse any source files in the specified path: " + PATH);
+            System.err.println("⚠️ Warning: Qdox did not find or parse any source files in the specified path: " + ROOT_PATH);
         } else {
             System.out.println("📂 Successfully indexed " + builder.getSources().size() + " source files.");
         }
@@ -149,7 +151,7 @@ public class CallGraphGenerator {
             // --- AUTOMATICALLY COPY FILES INTO process/timestamp/ PRESERVING PACKAGES ---
             String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").format(LocalDateTime.now());
             Path targetBaseDir = Paths.get("process", timestamp);
-            Path sourceBaseDir = Paths.get(PATH).toAbsolutePath().normalize();
+            Path sourceBaseDir = Paths.get(ROOT_PATH).toAbsolutePath().normalize();
 
             System.out.println("\n📦 Copying processed files to: " + targetBaseDir.toAbsolutePath() + " (preserving packages)...");
             int copiedCount = 0;
@@ -457,13 +459,13 @@ public class CallGraphGenerator {
         }
 
         try {
-            Path basePath = Paths.get(PATH).toAbsolutePath().normalize();
+            Path basePath = Paths.get(ROOT_PATH).toAbsolutePath().normalize();
             Path filePath = Paths.get(cls.getSource().getURL().toURI()).toAbsolutePath().normalize();
 
             return basePath.relativize(filePath).toString().replace('\\', '/');
         } catch (Exception e) {
             String rawPath = cls.getSource().getURL().getPath().replace('\\', '/');
-            String normBasePath = PATH.replace('\\', '/');
+            String normBasePath = ROOT_PATH.replace('\\', '/');
             if (rawPath.contains(normBasePath)) {
                 return rawPath.substring(rawPath.indexOf(normBasePath) + normBasePath.length()).replaceAll("^/", "");
             }
