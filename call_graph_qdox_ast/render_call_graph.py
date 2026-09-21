@@ -6,9 +6,10 @@ from pathlib import Path
 
 
 def is_loop_node(node):
-    """Checks if node is flagged with a circular dependency or loop status."""
+    """Checks if node is flagged with a circular dependency, loop status, or inLoop property."""
     status = node.get("status", "")
-    return status in ("circular_dependency_detected", "loop_detected")
+    in_loop = node.get("inLoop", False)
+    return in_loop or status in ("circular_dependency_detected", "loop_detected")
 
 
 def print_ascii_tree(node, indent="", is_last=True):
@@ -19,11 +20,16 @@ def print_ascii_tree(node, indent="", is_last=True):
     method = node.get("methodName", "unknown")
     cls = node.get("className", "unknown")
     status = node.get("status")
+    in_loop = node.get("inLoop", False)
 
     # Format status flag and explicit loop warning
     status_str = f" [{status}]" if status else ""
-    if is_loop_node(node):
-        status_str = " 🔄 [LOOP DETECTED]"
+    
+    # Check for inLoop or loop statuses
+    if in_loop:
+        status_str += " 🔄 [inLoop: True]"
+    elif status in ("circular_dependency_detected", "loop_detected"):
+        status_str += " 🔄 [LOOP DETECTED]"
 
     # Shorten class name for cleaner CLI output
     short_class = cls.split(".")[-1]
@@ -49,7 +55,8 @@ def collect_loops(node, loops=None):
             "symbol": node.get("fullyQualifiedSymbol", f"{node.get('className')}.{node.get('methodName')}"),
             "class": node.get("className", "").split(".")[-1],
             "method": node.get("methodName", ""),
-            "depth": node.get("depth", 0)
+            "depth": node.get("depth", 0),
+            "inLoop": node.get("inLoop", False)
         })
 
     for child in node.get("callees", []):
@@ -69,7 +76,8 @@ def export_to_dot(root_node, dot_filepath):
             parent_id,
             node.get('methodName'),
             node.get('className').split('.')[-1],
-            node.get('status')
+            node.get('status'),
+            node.get('inLoop', False)
         ))
 
         for child in node.get("callees", []):
@@ -89,15 +97,15 @@ def export_to_dot(root_node, dot_filepath):
         f.write("    edge [fontname=\"Courier\"];\n\n")
 
         # Write nodes
-        for node_id, method, short_cls, status in nodes:
+        for node_id, method, short_cls, status, in_loop in nodes:
             label = f"{method}()\\n({short_cls})"
             fillcolor = "#f9f9f9"
 
             if status == "interface_endpoint":
                 fillcolor = "#e1f5fe"  # Light blue
-            elif status in ("circular_dependency_detected", "loop_detected"):
+            elif in_loop or status in ("circular_dependency_detected", "loop_detected"):
                 fillcolor = "#ffcdd2"  # Red / Orange highlight for loop nodes
-                label += "\\n[LOOP]"
+                label += "\\n[inLoop]" if in_loop else "\\n[LOOP]"
 
             f.write(f'    "{node_id}" [label="{label}", fillcolor="{fillcolor}"];\n')
 

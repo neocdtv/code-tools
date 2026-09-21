@@ -23,7 +23,8 @@ public class SymbolSolverSetup {
         Files.walk(projectRoot)
                 .filter(Files::isDirectory)
                 // Look for both main and test source roots
-                .filter(path -> path.endsWith("src/main/java") || path.endsWith("src/test/java"))
+                //.filter(path -> path.endsWith("src/main/java") || path.endsWith("src/test/java"))
+                .filter(path -> path.endsWith("src/main/java"))
                 .forEach(sourceRoot -> {
                     try {
                         // Add each module's source root to the solver

@@ -126,7 +126,7 @@ public class CallGraphGenerator {
         System.out.println("📦 Filtering calls to package prefix: '" + PACKAGE_PREFIX + "'");
         System.out.println("🔍 Building Call Graph starting at: " + rootClass.getFullyQualifiedName() + "." + METHOD);
 
-        CallNode tree = buildTree(rootClass.getFullyQualifiedName(), METHOD, null, 0, new HashSet<>());
+        CallNode tree = buildTree(rootClass.getFullyQualifiedName(), METHOD, null, 0, new HashSet<>(), false);
 
         // Wrap graph inside top-level metadata object
         CallGraphOutput outputWrapper = new CallGraphOutput(commitId, Instant.now().toString(), tree);
@@ -216,7 +216,7 @@ public class CallGraphGenerator {
         }
     }
 
-    private static CallNode buildTree(String fullyQualifiedClass, String methodName, List<String> expectedArgTypes, int currentDepth, Set<String> visitedPath) {
+    private static CallNode buildTree(String fullyQualifiedClass, String methodName ,List<String> expectedArgTypes, int currentDepth, Set<String> visitedPath, boolean inLoop) {
         JavaClass cls = builder.getClassByName(fullyQualifiedClass);
         if (cls == null) {
             cls = findClassByName(fullyQualifiedClass);
@@ -224,7 +224,7 @@ public class CallGraphGenerator {
 
         if (cls == null) {
             System.err.println("⚠️ Warning: Could not resolve referenced class to a source file: '" + fullyQualifiedClass + "' (Invoked method: " + methodName + ", Depth: " + currentDepth + ")");
-            CallNode missingNode = new CallNode(fullyQualifiedClass + "." + methodName, fullyQualifiedClass, methodName, currentDepth);
+            CallNode missingNode = new CallNode(fullyQualifiedClass + "." + methodName, fullyQualifiedClass, methodName, currentDepth, inLoop);
             missingNode.status = "class_not_in_sources";
             return missingNode;
         }
@@ -241,7 +241,7 @@ public class CallGraphGenerator {
             boolean isRepository = isSpringRepository(cls);
             if (isRepository) {
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
-                CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
+                CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth, inLoop);
 
                 if (currentDepth >= MAX_DEPTH) {
                     node.status = "max_depth_reached";
@@ -272,7 +272,7 @@ public class CallGraphGenerator {
                 trackClassFile(cls);
             } else {
                 String fullSymbol = fullyQualifiedClass + "." + methodName;
-                CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth);
+                CallNode node = new CallNode(fullSymbol, fullyQualifiedClass, methodName, currentDepth, inLoop);
 
                 if (currentDepth >= MAX_DEPTH) {
                     node.status = "max_depth_reached";
@@ -297,7 +297,7 @@ public class CallGraphGenerator {
         }
 
         String fullSymbol = targetClassName + "." + methodName;
-        CallNode node = new CallNode(fullSymbol, targetClassName, methodName, currentDepth);
+        CallNode node = new CallNode(fullSymbol, targetClassName, methodName, currentDepth, inLoop);
 
         if (resolvedImplFqn != null) {
             node.resolvedImplementation = resolvedImplFqn;
@@ -345,7 +345,7 @@ public class CallGraphGenerator {
             System.out.println("   ├── 🔗 [Caller: " + targetClassName + "." + methodName + " (Depth " + currentDepth + ")] " +
                     "--> Leading to Callee: " + callee.fullyQualifiedClass + "." + callee.methodName + "()");
 
-            CallNode childNode = buildTree(callee.fullyQualifiedClass, callee.methodName, callee.argTypes, currentDepth + 1, nextVisited);
+            CallNode childNode = buildTree(callee.fullyQualifiedClass, callee.methodName, callee.argTypes, currentDepth + 1, nextVisited, callee.inLoop);
             node.callees.add(childNode);
         }
 
@@ -536,47 +536,6 @@ public class CallGraphGenerator {
         return cls != null && cls.getSource() != null && cls.getSource().getURL() != null;
     }
 
-    private static String resolveTypeInClass(JavaClass cls, String typeName) {
-        if (typeName == null) return null;
-        if (typeName.contains(".")) return typeName;
-
-        if (cls.getSource() != null) {
-            for (String imp : cls.getSource().getImports()) {
-                if (imp.endsWith("." + typeName)) {
-                    trackClassFile(findClassByName(imp));
-                    return imp;
-                }
-            }
-        }
-
-        if (cls.getPackageName() != null && !cls.getPackageName().isEmpty()) {
-            String testFqn = cls.getPackageName() + "." + typeName;
-            JavaClass samePkgClass = findClassByName(testFqn);
-            if (samePkgClass != null) {
-                trackClassFile(samePkgClass);
-                return samePkgClass.getFullyQualifiedName();
-            }
-        }
-
-        JavaClass matched = findClassByName(typeName);
-        if (matched != null) {
-            trackClassFile(matched);
-            return matched.getFullyQualifiedName();
-        }
-
-        try {
-            Class<?> jdkClass = Class.forName("java.util.stream." + typeName);
-            return jdkClass.getName();
-        } catch (ClassNotFoundException ignored) {}
-
-        try {
-            Class<?> jdkClass = Class.forName("java.util." + typeName);
-            return jdkClass.getName();
-        } catch (ClassNotFoundException ignored) {}
-
-        return typeName;
-    }
-
     private static JavaClass findClassByName(String simpleOrFqn) {
         for (JavaClass cls : builder.getClasses()) {
             if (cls.getName().equals(simpleOrFqn) || cls.getFullyQualifiedName().equals(simpleOrFqn)) {
@@ -662,6 +621,7 @@ public class CallGraphGenerator {
         public String className;
         public String filePath;
         public String methodName;
+        public boolean inLoop;
         public List<String> modifiers = new ArrayList<>();
         public List<AnnotationNode> classAnnotations = new ArrayList<>();
         public List<AnnotationNode> methodAnnotations = new ArrayList<>();
@@ -675,11 +635,12 @@ public class CallGraphGenerator {
         public List<String> sourceCode;
         public List<CallNode> callees = new ArrayList<>();
 
-        public CallNode(String fullyQualifiedSymbol, String className, String methodName, int depth) {
+        public CallNode(String fullyQualifiedSymbol, String className, String methodName, int depth, boolean inLoop) {
             this.fullyQualifiedSymbol = fullyQualifiedSymbol;
             this.className = className;
             this.methodName = methodName;
             this.depth = depth;
+            this.inLoop = inLoop;
         }
     }
 

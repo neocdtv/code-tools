@@ -5,6 +5,10 @@ import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.resolution.UnsolvedSymbolException;
 import com.github.javaparser.resolution.declarations.ResolvedMethodDeclaration;
+import com.github.javaparser.symbolsolver.JavaSymbolSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.JavaParserTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeSolver;
 import com.thoughtworks.qdox.model.JavaClass;
 import com.thoughtworks.qdox.model.JavaMethod;
 
@@ -23,68 +27,125 @@ public class ParserBridge {
      * The QDox signature you need to maintain.
      */
     public static List<CalleeTarget> parseCalleesFromSource(JavaClass declaringClass, JavaMethod method) {
-        List<CalleeTarget> targets = new ArrayList<>();
+        Set<CalleeTarget> targets = new LinkedHashSet<>();
 
         try {
-            // 1. Get the physical file from QDox
             File sourceFile = new File(declaringClass.getSource().getURL().toURI());
             if (!sourceFile.exists()) {
-                return targets;
+                return new ArrayList<>();
             }
 
-            // 2. Parse the file using JavaParser
+            // Now when it parses, it will be able to resolve external classes
             CompilationUnit cu = StaticJavaParser.parse(sourceFile);
 
-            // 3. Find the exact matching Class and Method in the JavaParser AST
-            Optional<ClassOrInterfaceDeclaration> jpClassOpt = cu.getClassByName(declaringClass.getName());
+            Optional<ClassOrInterfaceDeclaration> jpClassOpt = cu.findAll(ClassOrInterfaceDeclaration.class).stream()
+                    .filter(c -> c.getNameAsString().equals(declaringClass.getName()))
+                    .findFirst();
+
             if (jpClassOpt.isEmpty()) {
-                return targets;
+                return new ArrayList<>();
             }
             ClassOrInterfaceDeclaration jpClass = jpClassOpt.get();
 
-            // Match by name and parameter count to handle basic overloading
             Optional<MethodDeclaration> jpMethodOpt = jpClass.getMethodsByName(method.getName()).stream()
-                    .filter(m -> m.getParameters().size() == method.getParameters().size())
+                    .filter(m -> matchesParameters(m, method))
                     .findFirst();
 
             if (jpMethodOpt.isEmpty()) {
-                return targets;
+                return new ArrayList<>();
             }
             MethodDeclaration jpMethod = jpMethodOpt.get();
 
-            // 4. Call your JavaParser method (Setting depth to 3 as it was in your original snippet)
             Set<String> visited = new HashSet<>();
-            Map<String, Object> nodeMap = parseMethodToNode(cu, jpClass, jpMethod, sourceFile, 0, visited);
+            Map<String, Object> nodeMap = parseMethodToNode(cu, jpClass, jpMethod, sourceFile, 3, visited);
 
-            // 5. Transform the Map<String, Object> back into List<CalleeTarget>
-            List<Map<String, Object>> callees = (List<Map<String, Object>>) nodeMap.getOrDefault("callees", Collections.emptyList());
+            Object calleesObj = nodeMap.get("callees");
+            if (calleesObj instanceof List) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> callees = (List<Map<String, Object>>) calleesObj;
 
-            for (Map<String, Object> calleeNode : callees) {
-                String className = (String) calleeNode.get("className");
-                String methodName = (String) calleeNode.get("methodName");
+                for (Map<String, Object> calleeNode : callees) {
+                    String className = (String) calleeNode.get("className");
+                    String methodName = (String) calleeNode.get("methodName");
 
-                // Extract parameter types if your JavaParser method populated them on callees
-                List<Map<String, Object>> params = (List<Map<String, Object>>) calleeNode.getOrDefault("parameters", Collections.emptyList());
-                List<String> paramTypes = params.stream()
-                        .map(p -> (String) p.get("type"))
-                        .collect(Collectors.toList());
+                    List<String> paramTypes = new ArrayList<>();
+                    Object paramsObj = calleeNode.get("parameters");
 
-                // Avoid duplicates in the flat list
-                CalleeTarget target = new CalleeTarget(className, methodName, paramTypes);
-                if (!targets.contains(target)) {
-                    targets.add(target);
+                    if (paramsObj instanceof List) {
+                        @SuppressWarnings("unchecked")
+                        List<Map<String, Object>> params = (List<Map<String, Object>>) paramsObj;
+                        for (Map<String, Object> p : params) {
+                            paramTypes.add((String) p.get("type"));
+                        }
+                    }
+
+                    boolean inLoop = isMethodCalledInLoop(jpMethod, methodName);
+                    targets.add(new CalleeTarget(className, methodName, paramTypes, inLoop));
                 }
             }
 
         } catch (Exception e) {
-            // Fallback: If JavaParser fails or file isn't found on disk, return empty or use string-parsing fallback
             System.err.println("Failed to bridge QDox to JavaParser for: " + method.getName());
             e.printStackTrace();
-
         }
 
-        return targets;
+        return new ArrayList<>(targets);
     }
+
+    private static boolean isMethodCalledInLoop(MethodDeclaration jpMethod, String calleeMethodName) {
+        List<com.github.javaparser.ast.expr.MethodCallExpr> methodCalls =
+                jpMethod.findAll(com.github.javaparser.ast.expr.MethodCallExpr.class);
+
+        for (com.github.javaparser.ast.expr.MethodCallExpr call : methodCalls) {
+            if (call.getNameAsString().equals(calleeMethodName)) {
+                if (isInsideLoop(call)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isInsideLoop(com.github.javaparser.ast.Node node) {
+        Optional<com.github.javaparser.ast.Node> parentOpt = node.getParentNode();
+
+        while (parentOpt.isPresent()) {
+            com.github.javaparser.ast.Node parent = parentOpt.get();
+
+            if (parent instanceof com.github.javaparser.ast.stmt.ForStmt ||
+                    parent instanceof com.github.javaparser.ast.stmt.ForEachStmt ||
+                    parent instanceof com.github.javaparser.ast.stmt.WhileStmt ||
+                    parent instanceof com.github.javaparser.ast.stmt.DoStmt) {
+                return true;
+            }
+
+            parentOpt = parent.getParentNode();
+        }
+
+        return false;
+    }
+
+
+
+    private static boolean matchesParameters(MethodDeclaration jpMethod, JavaMethod qdoxMethod) {
+        if (jpMethod.getParameters().size() != qdoxMethod.getParameters().size()) {
+            return false;
+        }
+
+        for (int i = 0; i < jpMethod.getParameters().size(); i++) {
+            String jpParamType = jpMethod.getParameter(i).getType().asString();
+            String qdoxParamType = qdoxMethod.getParameters().get(i).getType().getValue();
+
+            String jpBaseType = jpParamType.replaceAll("<.*>", "").replaceAll("\\[\\]", "");
+            String qdoxBaseType = qdoxParamType.replaceAll("<.*>", "").replaceAll("\\[\\]", "");
+
+            if (!jpBaseType.endsWith(qdoxBaseType) && !qdoxBaseType.endsWith(jpBaseType)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 
     private static Map<String, Object> parseMethodToNode(
             CompilationUnit cu,
@@ -194,52 +255,11 @@ public class ParserBridge {
                             ResolvedMethodDeclaration resolvedCall = call.resolve();
                             targetClassName = resolvedCall.declaringType().getQualifiedName();
                         } catch (Exception e) {
+                            System.err.println("MethodSourceCode:");
+                            sourceCodeLines.forEach(sourceCodeLine -> System.err.println(sourceCodeLine));
                             System.err.println("SymbolSolver failed to resolve: " + call.getNameAsString() +
                                     " | Reason: " + e.getMessage());
-                            // Smarter unwrapping for unresolved scopes
-                            if (call.getScope().isPresent()) {
-                                Expression scope = call.getScope().get();
-
-                                if (scope.isThisExpr() || scope.isSuperExpr()) {
-                                    targetClassName = fullyQualifiedClassName;
-                                } else if (scope.isObjectCreationExpr()) {
-                                    String rawType = scope.asObjectCreationExpr().getType().asString();
-                                    targetClassName = resolveFullyQualifiedType(cu, rawType);
-                                } else if (scope.isClassExpr()) {
-                                    String rawType = scope.asClassExpr().getType().asString();
-                                    targetClassName = resolveFullyQualifiedType(cu, rawType);
-                                } else if (scope.isNameExpr()) {
-                                    String scopeName = scope.asNameExpr().getNameAsString();
-                                    if (Character.isUpperCase(scopeName.charAt(0))) {
-                                        targetClassName = resolveFullyQualifiedType(cu, scopeName);
-                                    } else {
-                                        String varType = resolveVariableType(scopeName, method, clazz);
-                                        if (varType != null) {
-                                            targetClassName = resolveFullyQualifiedType(cu, varType);
-                                        } else {
-                                            targetClassName = "UnresolvedClass<" + scopeName + ">";
-                                        }
-                                    }
-                                } else if (scope.isMethodCallExpr()) {
-                                    // ---> FIX: Handle chained method calls like var.getSomething().method() <---
-                                    MethodCallExpr chainedCall = scope.asMethodCallExpr();
-                                    try {
-                                        // Try to ask JavaParser what the return type of the intermediate method is
-                                        String returnType = chainedCall.resolve().getReturnType().describe();
-                                        targetClassName = resolveFullyQualifiedType(cu, returnType);
-                                    } catch (Exception ex) {
-                                        // If we can't find the external class, at least clean up the JSON
-                                        targetClassName = "UnresolvedReturnType<" + chainedCall.getNameAsString() + ">";
-                                    }
-                                } else if (scope.isEnclosedExpr() || scope.isCastExpr()) {
-                                    // Handles casts like: ((String) myVar).length()
-                                    targetClassName = "CastOrEnclosedExpression";
-                                } else {
-                                    targetClassName = "UnresolvedClass<" + scope.getClass().getSimpleName() + ">";
-                                }
-                            } else {
-                                targetClassName = fullyQualifiedClassName;
-                            }
+                            targetClassName = smartUnwrapping(cu, clazz, method, fullyQualifiedClassName, call);
                         }
                     }
 
@@ -301,6 +321,59 @@ public class ParserBridge {
 
         node.put("callees", callees);
         return node;
+    }
+
+    private static String smartUnwrapping(CompilationUnit cu, ClassOrInterfaceDeclaration clazz, MethodDeclaration method, String fullyQualifiedClassName, MethodCallExpr call) {
+        String targetClassName;// Smarter unwrapping for unresolved scopes
+        if (call.getScope().isPresent()) {
+            Expression scope = call.getScope().get();
+
+            if (scope.isThisExpr() || scope.isSuperExpr()) {
+                targetClassName = fullyQualifiedClassName;
+            } else if (scope.isObjectCreationExpr()) {
+                String rawType = scope.asObjectCreationExpr().getType().asString();
+                targetClassName = resolveFullyQualifiedType(cu, rawType);
+            } else if (scope.isClassExpr()) {
+                String rawType = scope.asClassExpr().getType().asString();
+                targetClassName = resolveFullyQualifiedType(cu, rawType);
+            } else if (scope.isNameExpr()) {
+                String scopeName = scope.asNameExpr().getNameAsString();
+                if (Character.isUpperCase(scopeName.charAt(0))) {
+                    targetClassName = resolveFullyQualifiedType(cu, scopeName);
+                } else {
+                    String varType = resolveVariableType(scopeName, method, clazz);
+                    if (varType != null) {
+                        targetClassName = resolveFullyQualifiedType(cu, varType);
+                    } else {
+                        targetClassName = "UnresolvedClass<" + scopeName + ">";
+                    }
+                }
+            } else if (scope.isMethodCallExpr()) {
+                // ---> FIX: Handle chained method calls like var.getSomething().method() <---
+                MethodCallExpr chainedCall = scope.asMethodCallExpr();
+                try {
+                    // Try to ask JavaParser what the return type of the intermediate method is
+                    String returnType = chainedCall.resolve().getReturnType().describe();
+                    targetClassName = resolveFullyQualifiedType(cu, returnType);
+                } catch (Exception ex) {
+                    // If the return type is unknown, attribute the target to the root object
+                    // e.g., in `userRepo.findById().get()`, attribute `get()` to `userRepo`
+                    if (chainedCall.getScope().isPresent()) {
+                        targetClassName = "ChainedFrom<" + chainedCall.getScope().get().toString() + ">";
+                    } else {
+                        targetClassName = "UnresolvedReturnType<" + chainedCall.getNameAsString() + ">";
+                    }
+                }
+            } else if (scope.isEnclosedExpr() || scope.isCastExpr()) {
+                // Handles casts like: ((String) myVar).length()
+                targetClassName = "CastOrEnclosedExpression";
+            } else {
+                targetClassName = "UnresolvedClass<" + scope.getClass().getSimpleName() + ">";
+            }
+        } else {
+            targetClassName = fullyQualifiedClassName;
+        }
+        return targetClassName;
     }
 
     private static List<Map<String, Object>> mapAnnotations(List<AnnotationExpr> annotations) {
@@ -454,5 +527,24 @@ public class ParserBridge {
         }
 
         return null; // Variable declaration not found in this class/method
+    }
+
+    public static void setupSymbolSolver(File sourceRoot) {
+        // 1. Create a combined solver
+        CombinedTypeSolver combinedSolver = new CombinedTypeSolver();
+
+        // 2. Add standard Java types (String, List, etc.)
+        combinedSolver.add(new ReflectionTypeSolver());
+
+        // 3. Add your project's source code root so it can find CWAuthorizationUtil
+        // Replace "src/main/java" with the actual path to your source root!
+        combinedSolver.add(new JavaParserTypeSolver(sourceRoot));
+
+        // (Optional) If CWAuthorizationUtil is in an external JAR, add a JarTypeSolver:
+        // combinedSolver.add(new JarTypeSolver("path/to/dependency.jar"));
+
+        // 4. Register the solver
+        JavaSymbolSolver symbolSolver = new JavaSymbolSolver(combinedSolver);
+        StaticJavaParser.getConfiguration().setSymbolResolver(symbolSolver);
     }
 }
