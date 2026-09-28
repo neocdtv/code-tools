@@ -8,13 +8,9 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.Parameter;
-import com.github.javaparser.ast.expr.AnnotationExpr;
-import com.github.javaparser.ast.expr.MethodCallExpr;
-import com.github.javaparser.ast.expr.VariableDeclarationExpr;
+import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
-import com.github.javaparser.ast.expr.NormalAnnotationExpr;
-import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
-import com.github.javaparser.ast.expr.MemberValuePair;
+import com.github.javaparser.resolution.declarations.ResolvedMethodDeclaration;
 
 import java.io.File;
 import java.io.IOException;
@@ -83,46 +79,72 @@ public class Main {
         }
     }
 
-    private static Map<String, Object> parseMethodToNode(CompilationUnit cu, ClassOrInterfaceDeclaration clazz, MethodDeclaration method, File sourceFile, int depth, Set<String> visited) {
+    private static Map<String, Object> parseMethodToNode(
+            CompilationUnit cu,
+            ClassOrInterfaceDeclaration clazz,
+            MethodDeclaration method,
+            File sourceFile,
+            int depth,
+            Set<String> visited) {
+
         Map<String, Object> node = new LinkedHashMap<>();
 
-        String packageName = cu.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("");
-        String className = clazz.getNameAsString();
-        String fullyQualifiedClassName = packageName.isEmpty() ? className : packageName + "." + className;
+        String fullyQualifiedClassName = clazz.getFullyQualifiedName().orElseGet(() -> {
+            String packageName = cu.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("");
+            String className = clazz.getNameAsString();
+            return packageName.isEmpty() ? className : packageName + "." + className;
+        });
+
         String methodName = method.getNameAsString();
         String fqSymbol = fullyQualifiedClassName + "." + methodName;
 
         node.put("fullyQualifiedSymbol", fqSymbol);
         node.put("className", fullyQualifiedClassName);
-        
-        String absolutePath = sourceFile.getAbsolutePath();
-        node.put("filePath", absolutePath);
+        node.put("filePath", sourceFile.getAbsolutePath());
         node.put("methodName", methodName);
-        
-        List<String> modifiers = method.getModifiers().stream().map(m -> m.getKeyword().asString()).collect(Collectors.toList());
+
+        List<String> modifiers = method.getModifiers().stream()
+                .map(m -> m.getKeyword().asString())
+                .collect(Collectors.toList());
         node.put("modifiers", modifiers);
 
         node.put("classAnnotations", mapAnnotations(clazz.getAnnotations()));
         node.put("methodAnnotations", mapAnnotations(method.getAnnotations()));
         node.put("resolvedImplementation", null);
-        node.put("returnType", resolveFullyQualifiedType(cu, method.getType().asString()));
 
+        // Resolve return type
+        String returnTypeStr = method.getType().asString();
+        try {
+            returnTypeStr = method.getType().resolve().describe();
+        } catch (Exception ignored) {
+            returnTypeStr = resolveFullyQualifiedType(cu, returnTypeStr);
+        }
+        node.put("returnType", returnTypeStr);
+
+        // Resolve parameter types
         List<Map<String, Object>> parameters = new ArrayList<>();
         for (Parameter p : method.getParameters()) {
             Map<String, Object> paramMap = new LinkedHashMap<>();
             paramMap.put("name", p.getNameAsString());
-            paramMap.put("type", resolveFullyQualifiedType(cu, p.getType().asString()));
+
+            String paramTypeStr = p.getType().asString();
+            try {
+                paramTypeStr = p.getType().resolve().describe();
+            } catch (Exception ignored) {
+                paramTypeStr = resolveFullyQualifiedType(cu, paramTypeStr);
+            }
+
+            paramMap.put("type", paramTypeStr);
             parameters.add(paramMap);
         }
         node.put("parameters", parameters);
 
-        int startLine = method.getBegin().map(p -> p.line).orElse(0);
-        int endLine = method.getEnd().map(p -> p.line).orElse(0);
-        node.put("startLine", startLine);
-        node.put("endLine", endLine);
+        node.put("startLine", method.getBegin().map(p -> p.line).orElse(0));
+        node.put("endLine", method.getEnd().map(p -> p.line).orElse(0));
         node.put("depth", depth);
         node.put("status", null);
 
+        // Source code extraction
         List<String> sourceCodeLines = new ArrayList<>();
         if (method.getBody().isPresent()) {
             String bodyStr = method.getBody().get().toString();
@@ -134,79 +156,111 @@ public class Main {
         node.put("sourceCode", sourceCodeLines);
 
         List<Map<String, Object>> callees = new ArrayList<>();
+
         if (depth < 4) {
-            for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
-                String calledMethodName = call.getNameAsString();
-                
-                if (IGNORED_METHODS.contains(calledMethodName)) {
+            // FIX 1: Walk the AST once to preserve top-down, left-to-right source code order
+            List<Expression> invocationNodes = method.findAll(Expression.class).stream()
+                    .filter(expr -> expr instanceof MethodCallExpr || expr instanceof MethodReferenceExpr)
+                    .collect(Collectors.toList());
+
+            for (Expression expr : invocationNodes) {
+                String calledMethodName;
+                String targetClassName = null;
+                ResolvedMethodTarget target = null;
+
+                if (expr instanceof MethodCallExpr) {
+                    MethodCallExpr call = (MethodCallExpr) expr;
+                    calledMethodName = call.getNameAsString();
+                    if (IGNORED_METHODS.contains(calledMethodName)) {
+                        continue;
+                    }
+
+                    // Try local AST resolution first
+                    target = resolveMethodTarget(cu, clazz, method, call);
+                    if (target != null && target.clazz != null) {
+                        targetClassName = target.clazz.getFullyQualifiedName().orElse(null);
+                    }
+
+                    // Fall back to SymbolSolver for method calls
+                    if (targetClassName == null) {
+                        try {
+                            ResolvedMethodDeclaration resolvedCall = call.resolve();
+                            targetClassName = resolvedCall.declaringType().getQualifiedName();
+                        } catch (Exception e) {
+                            // FIX 2: Safely handle unresolved scopes without treating variables as Classes
+                            if (call.getScope().isPresent()) {
+                                Expression scope = call.getScope().get();
+                                if (scope.isThisExpr() || scope.isSuperExpr()) {
+                                    targetClassName = fullyQualifiedClassName;
+                                } else {
+                                    targetClassName = "UnresolvedClass<" + scope.toString() + ">";
+                                }
+                            } else {
+                                // No scope means local method call
+                                targetClassName = fullyQualifiedClassName;
+                            }
+                        }
+                    }
+
+                } else if (expr instanceof MethodReferenceExpr) {
+                    MethodReferenceExpr ref = (MethodReferenceExpr) expr;
+                    calledMethodName = ref.getIdentifier();
+                    if (IGNORED_METHODS.contains(calledMethodName)) {
+                        continue;
+                    }
+
+                    // Resolve target class for method references
+                    try {
+                        ResolvedMethodDeclaration resolvedRef = ref.resolve();
+                        targetClassName = resolvedRef.declaringType().getQualifiedName();
+                    } catch (Exception e) {
+                        // FIX 2 (Applied to References): Safely evaluate scope
+                        Expression scope = ref.getScope();
+                        if (scope.isThisExpr() || scope.isSuperExpr()) {
+                            targetClassName = fullyQualifiedClassName;
+                        } else {
+                            targetClassName = "UnresolvedClass<" + scope.toString() + ">";
+                        }
+                    }
+                } else {
                     continue;
                 }
 
-                ResolvedMethodTarget target = resolveMethodTarget(cu, clazz, method, call);
-                
-                String targetClassName = fullyQualifiedClassName;
-                if (target != null && target.clazz != null) {
-                    String targetPkg = target.cu.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("");
-                    String targetCls = target.clazz.getNameAsString();
-                    targetClassName = targetPkg.isEmpty() ? targetCls : targetPkg + "." + targetCls;
-                } else if (call.getScope().isPresent()) {
-                    String scope = call.getScope().get().toString();
-                    
-                    Optional<VariableDeclarationExpr> localDecl = method.findAll(VariableDeclarationExpr.class).stream()
-                            .filter(v -> v.getVariables().stream().anyMatch(var -> var.getNameAsString().equals(scope)))
-                            .findFirst();
-                    
-                    if (localDecl.isPresent()) {
-                        targetClassName = localDecl.get().getElementType().asString();
-                    } else {
-                        Optional<FieldDeclaration> field = cu.findAll(FieldDeclaration.class).stream()
-                                .filter(f -> f.getVariables().stream().anyMatch(v -> v.getNameAsString().equals(scope)))
-                                .findFirst();
-                        if (field.isPresent()) {
-                            List<ClassOrInterfaceType> types = field.get().findAll(ClassOrInterfaceType.class);
-                            if (!types.isEmpty()) {
-                                targetClassName = types.get(0).getNameAsString();
-                            }
-                        } else {
-                            targetClassName = scope.substring(0, 1).toUpperCase() + scope.substring(1);
-                        }
-                    }
-                }
                 String targetFqSymbol = targetClassName + "." + calledMethodName;
                 String visitKey = fqSymbol + "->" + targetFqSymbol;
 
                 if (!visited.contains(visitKey)) {
                     visited.add(visitKey);
-                    
+
                     if (target != null && target.methodDecl != null) {
                         callees.add(parseMethodToNode(target.cu, target.clazz, target.methodDecl, target.file, depth + 1, visited));
                     } else {
                         Map<String, Object> leaf = new LinkedHashMap<>();
                         leaf.put("fullyQualifiedSymbol", targetFqSymbol);
                         leaf.put("className", targetClassName);
-                        leaf.put("filePath", absolutePath);
+                        leaf.put("filePath", sourceFile.getAbsolutePath());
                         leaf.put("methodName", calledMethodName);
-                        leaf.put("modifiers", List.of());
-                        leaf.put("classAnnotations", List.of());
-                        leaf.put("methodAnnotations", List.of());
+                        leaf.put("modifiers", Collections.emptyList());
+                        leaf.put("classAnnotations", Collections.emptyList());
+                        leaf.put("methodAnnotations", Collections.emptyList());
                         leaf.put("resolvedImplementation", null);
                         leaf.put("returnType", null);
-                        leaf.put("parameters", List.of());
+                        leaf.put("parameters", Collections.emptyList());
                         leaf.put("startLine", 0);
                         leaf.put("endLine", 0);
                         leaf.put("depth", depth + 1);
                         leaf.put("status", "method_not_found");
                         leaf.put("sourceCode", null);
-                        leaf.put("callees", List.of());
+                        leaf.put("callees", Collections.emptyList());
                         callees.add(leaf);
                     }
                 }
             }
         }
+
         node.put("callees", callees);
         return node;
     }
-
     private static String resolveFullyQualifiedType(CompilationUnit cu, String typeStr) {
         if (typeStr == null || typeStr.isEmpty()) {
             return typeStr;
