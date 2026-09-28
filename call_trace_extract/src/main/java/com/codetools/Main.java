@@ -53,8 +53,8 @@ public class Main {
     }
 
     private static final Set<String> IGNORED_TYPES = Set.of(
-            "List", "Set", "Map", "Collection", "Optional", "String", 
-            "Integer", "Long", "Boolean", "Double", "Float", "BigDecimal", 
+            "List", "Set", "Map", "Collection", "Optional", "String",
+            "Integer", "Long", "Boolean", "Double", "Float", "BigDecimal",
             "LocalDate", "LocalDateTime", "Object", "int", "long", "boolean", "double",
             "log", "logger", "LoggerFactory"
     );
@@ -62,7 +62,7 @@ public class Main {
     private static final Map<String, String> interfaceToImplClassName = new HashMap<>();
     private static final Map<String, ImportDeclaration> interfaceToImplImport = new HashMap<>();
 
-    public static void main(String[] args) { //
+    public static void main(String[] args) {
         if (args.length < 2) {
             System.out.println("Usage: mvn exec:java -Dexec.args=\"path/to/module/Class1.java methodName\"");
             return;
@@ -81,7 +81,7 @@ public class Main {
 
         Queue<Task> taskQueue = new ArrayDeque<>();
         Set<String> processedTasks = new HashSet<>();
-        
+
         Map<File, Set<String>> fileToMethodNames = new LinkedHashMap<>();
         Map<File, CompilationUnit> fileToCu = new HashMap<>();
 
@@ -105,10 +105,10 @@ public class Main {
                         .orElseThrow(() -> new RuntimeException("No class found in: " + currentTask.file.getName()));
 
                 String originalClassName = parentClass.getNameAsString();
-                
+
                 MethodResolutionResult resolvedMethod = findMethodRecursive(cu, parentClass, currentTask.methodName, projectRoot);
                 if (resolvedMethod == null) {
-                    System.out.println("Info: Method '" + currentTask.methodName + "' not found in '" + originalClassName + "' or its available superclasses. Skipping method task.");
+                    System.out.println("Method '" + currentTask.methodName + "' not found in '" + originalClassName + "' or its available superclasses. Skipping method task.");
                     continue;
                 }
 
@@ -152,14 +152,30 @@ public class Main {
                                         if (!IGNORED_TYPES.contains(baseTypeName)) {
                                             File targetFile = findSourceFileAcrossModules(projectRoot, baseTypeName);
                                             if (targetFile != null) {
-                                                targetFile = resolveConcreteFileIfNeeded(projectRoot, targetFile, baseTypeName);
-                                                Task nextTask = new Task(targetFile, call.getNameAsString());
-                                                if (!processedTasks.contains(targetFile.getAbsolutePath() + "#" + call.getNameAsString())) {
-                                                    taskQueue.add(nextTask);
-                                                    System.out.println("Queued cross-module extraction: " + targetFile.getName() + " -> " + call.getNameAsString());
+                                                // 1. Queue the interface file task
+                                                Task interfaceTask = new Task(targetFile, call.getNameAsString());
+                                                String interfaceTaskKey = interfaceTask.file.getAbsolutePath() + "#" + interfaceTask.methodName;
+                                                if (!processedTasks.contains(interfaceTaskKey)) {
+                                                    taskQueue.add(interfaceTask);
+                                                    System.out.println("Queued interface extraction: " + targetFile.getName() + " -> " + call.getNameAsString());
+                                                }
+
+                                                // 2. Check for a single implementation and queue it as well
+                                                resolveInterfaceToImplIfNeeded(projectRoot, baseTypeName);
+                                                if (interfaceToImplClassName.containsKey(baseTypeName)) {
+                                                    String implClassName = interfaceToImplClassName.get(baseTypeName);
+                                                    File implFile = findSourceFileAcrossModules(projectRoot, implClassName);
+                                                    if (implFile != null) {
+                                                        Task implTask = new Task(implFile, call.getNameAsString());
+                                                        String implTaskKey = implTask.file.getAbsolutePath() + "#" + implTask.methodName;
+                                                        if (!processedTasks.contains(implTaskKey)) {
+                                                            taskQueue.add(implTask);
+                                                            System.out.println("Queued concrete implementation extraction: " + implFile.getName() + " -> " + call.getNameAsString());
+                                                        }
+                                                    }
                                                 }
                                             } else {
-                                                System.out.println("Info: Source code for type '" + baseTypeName + "' is not available. Skipping method call: " + call.getNameAsString());
+                                                System.out.println("Source code for type '" + baseTypeName + "' is not available. Skipping method call: " + call.getNameAsString());
                                             }
                                         }
                                     }
@@ -176,7 +192,7 @@ public class Main {
                                                     System.out.println("Queued static utility extraction: " + targetFile.getName() + " -> " + call.getNameAsString());
                                                 }
                                             } else {
-                                                System.out.println("Info: Source code for static utility class '" + scopeName + "' is not available. Skipping method call: " + call.getNameAsString());
+                                                System.out.println("Source code for static utility class '" + scopeName + "' is not available. Skipping method call: " + call.getNameAsString());
                                             }
                                         }
                                     }
@@ -204,9 +220,10 @@ public class Main {
                     continue;
                 }
             }
-            
+
             ClassOrInterfaceDeclaration parentClass = cu.findFirst(ClassOrInterfaceDeclaration.class).orElseThrow();
             String originalClassName = parentClass.getNameAsString();
+            boolean isSourceInterface = parentClass.isInterface();
 
             Set<MethodDeclaration> methodsToExtract = new LinkedHashSet<>();
             for (String mName : methodNames) {
@@ -266,11 +283,12 @@ public class Main {
             cu.getPackageDeclaration().ifPresent(extractedCu::setPackageDeclaration);
             requiredImports.forEach(extractedCu::addImport);
 
-            String newClassName = originalClassName + "_extracted";
+            //String newClassName = originalClassName + "_extracted";
+            String newClassName = originalClassName;
             ClassOrInterfaceDeclaration newClass = new ClassOrInterfaceDeclaration();
             newClass.setName(newClassName);
             newClass.setPublic(true);
-            
+
             newClass.setInterface(parentClass.isInterface());
             parentClass.getTypeParameters().forEach(tp -> newClass.getTypeParameters().add(tp.clone()));
             parentClass.getExtendedTypes().forEach(et -> newClass.getExtendedTypes().add(et.clone()));
@@ -289,14 +307,14 @@ public class Main {
             )));
 
             requiredFields.forEach(f -> newClass.addMember(f.clone()));
-            
+
             for (MethodDeclaration m : methodsToExtract) {
                 int start = m.getBegin().map(p -> p.line).orElse(-1);
                 int end = m.getEnd().map(p -> p.line).orElse(-1);
-                
+
                 MethodDeclaration clonedMethod = m.clone();
                 clonedMethod.setComment(new BlockComment(String.format(
-                        "\n    * Original line numbers:\n    *   start: %d\n    *   end: %d\n    ", 
+                        "\n    * Original line numbers:\n    *   start: %d\n    *   end: %d\n    ",
                         start, end
                 )));
                 newClass.addMember(clonedMethod);
@@ -307,7 +325,7 @@ public class Main {
             extractedCu.walk(node -> {
                 if (node instanceof ClassOrInterfaceType) {
                     ClassOrInterfaceType cit = (ClassOrInterfaceType) node;
-                    
+
                     boolean isExtendsOrImplements = false;
                     Optional<com.github.javaparser.ast.Node> parent = cit.getParentNode();
                     while (parent.isPresent()) {
@@ -322,7 +340,7 @@ public class Main {
                         parent = p.getParentNode();
                     }
 
-                    if (!isExtendsOrImplements) {
+                    if (!isExtendsOrImplements && !isSourceInterface) {
                         String typeName = cit.getNameAsString();
                         if (interfaceToImplClassName.containsKey(typeName)) {
                             cit.setName(interfaceToImplClassName.get(typeName));
@@ -384,10 +402,10 @@ public class Main {
                         }
                     }
                 } catch (Exception e) {
-                    System.out.println("Info: Could not parse superclass file for " + superName + ": " + e.getMessage());
+                    System.out.println("Could not parse superclass file for " + superName + ": " + e.getMessage());
                 }
             } else {
-                System.out.println("Info: Source code for superclass '" + superName + "' is not available in the project.");
+                System.out.println("Source code for superclass '" + superName + "' is not available in the project.");
             }
         }
         return null;
@@ -442,10 +460,10 @@ public class Main {
     private static List<File> findAllImplementingClassFiles(File rootDir, String interfaceName) {
         try {
             return Files.walk(rootDir.toPath())
-                    .filter(p -> p.toFile().isFile() 
-                              && p.toString().endsWith(".java")
-                              && !p.toString().contains(File.separator + "test" + File.separator)
-                              && !p.toString().contains("src" + File.separator + "test"))
+                    .filter(p -> p.toFile().isFile()
+                            && p.toString().endsWith(".java")
+                            && !p.toString().contains(File.separator + "test" + File.separator)
+                            && !p.toString().contains("src" + File.separator + "test"))
                     .map(Path::toFile)
                     .filter(file -> {
                         try {
@@ -486,10 +504,10 @@ public class Main {
     private static File findSourceFileAcrossModules(File rootDir, String className) {
         try {
             return Files.walk(rootDir.toPath())
-                    .filter(p -> p.toFile().isFile() 
-                              && p.toFile().getName().equals(className + ".java")
-                              && !p.toString().contains(File.separator + "test" + File.separator)
-                              && !p.toString().contains("src" + File.separator + "test"))
+                    .filter(p -> p.toFile().isFile()
+                            && p.toFile().getName().equals(className + ".java")
+                            && !p.toString().contains(File.separator + "test" + File.separator)
+                            && !p.toString().contains("src" + File.separator + "test"))
                     .map(Path::toFile)
                     .findFirst()
                     .orElse(null);
