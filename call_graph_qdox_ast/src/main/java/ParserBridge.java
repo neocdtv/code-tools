@@ -255,10 +255,16 @@ public class ParserBridge {
                             ResolvedMethodDeclaration resolvedCall = call.resolve();
                             targetClassName = resolvedCall.declaringType().getQualifiedName();
                         } catch (Exception e) {
-                            System.err.println("MethodSourceCode:");
-                            sourceCodeLines.forEach(sourceCodeLine -> System.err.println(sourceCodeLine));
                             System.err.println("SymbolSolver failed to resolve: " + call.getNameAsString() +
                                     " | Reason: " + e.getMessage());
+                            System.err.println("MethodSourceCode:");
+                            for (int i = 0; i < sourceCodeLines.size(); i++) {
+                                String sourceCodeLine = sourceCodeLines.get(i);
+                                if (i == 0) {
+                                    System.err.print("\t");
+                                }
+                                System.err.println(sourceCodeLine);
+                            }
                             targetClassName = smartUnwrapping(cu, clazz, method, fullyQualifiedClassName, call);
                         }
                     }

@@ -148,9 +148,9 @@ public class CallGraphGenerator {
                 System.out.println(absPath);
             }
 
-            // --- AUTOMATICALLY COPY FILES INTO process/timestamp/ PRESERVING PACKAGES ---
+            // --- AUTOMATICALLY COPY FILES INTO processed/timestamp/ PRESERVING PACKAGES ---
             String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").format(LocalDateTime.now());
-            Path targetBaseDir = Paths.get("process", timestamp);
+            Path targetBaseDir = Paths.get("processed", timestamp);
             Path sourceBaseDir = Paths.get(ROOT_PATH).toAbsolutePath().normalize();
 
             System.out.println("\n📦 Copying processed files to: " + targetBaseDir.toAbsolutePath() + " (preserving packages)...");
